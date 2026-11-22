@@ -68,9 +68,9 @@ Base: `https://api.ticktick.com`
 
 Not documented. ticktick-opentodo-sync spaces requests (`TICKTICK_OPENTODO_SYNC_HTTP_MIN_INTERVAL`, default 0.3 s) and retries 429/5xx with backoff, honouring `Retry-After`. One pass is about `3 + number of lists` requests plus one GET per task that disappeared.
 
-### Recurrence (for phase 2)
+### Recurrence
 
-`repeatFlag` is an RRULE string plus `repeatFrom` (`0` from due date, `1` from completion date, `2` calendar). Completing a recurring task keeps the same task ID and advances its dates. The completed instance gets a new ID (**UNVERIFIED**, observed behaviour of the apps). v1 syncs only the current `dueDate`; `repeatFlag` and `reminders` are preserved on update because the full task is merged.
+`repeatFlag` is an RRULE string plus `repeatFrom`, returned as a string (`"0"` from due date, `"1"` from completion date, `"2"` calendar; `"2"` behaves like `"0"` in practice). **Verified 2026-11-22:** an update with `repeatFlag: ""` removes the rule. Completing a recurring task keeps the same task ID and advances its dates. The completed instance gets a new ID (**UNVERIFIED**, observed behaviour of the apps). v1 syncs only the current `dueDate`; `repeatFlag` and `reminders` are preserved on update because the full task is merged.
 
 ## OpenTodo REST API
 
@@ -105,7 +105,8 @@ Relevant fields: `id` (string, UUID), `title`, `description` (Markdown), `projec
 
 - **No `updated_at`** and no modified-since filter on tasks. A change feed exists (`/api/v1/sync`, `/api/v1/activity`, SSE `sync/events`, webhooks), but a hash diff is simpler and enough at this scale.
 - No tags. Labels are separate objects.
-- Recurring series: a task with `recurrence`. Occurrence records carry `series_id`/`occurrence_date`; v1 ignores records with `series_id` set.
+- Recurring series: a task with `recurrence`, OpenTodo's canonical English phrase (`every 2 weeks on saturday`, grammar in OpenTodo `docs/recurrence.md`), **not** an RRULE. Writers store `every N weeks` when the due date is on the single weekday ("Compatible"). Occurrence records carry `series_id`/`occurrence_date`; a *completed* one (`completed_at` set, not `skipped`) means "this date of the series was done". Otherwise they are ignored.
+- Completing a series (app, or REST `PATCH completed_at`) does not complete the task: it records a completed occurrence and moves the task to its next date. ticktick-opentodo-sync therefore sends `recurrence: null` with `completed_at` when TickTick says a repeating task is really done.
 
 ### End-to-end encryption
 

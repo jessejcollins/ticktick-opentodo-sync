@@ -47,6 +47,8 @@ class Snapshot:
     unchanged: set[str] = field(default_factory=set)
     """Present but not fetched (TickTick tasks already known to be completed)."""
     out_of_scope: set[str] = field(default_factory=set)
+    completed_occurrences: dict[str, set[str]] = field(default_factory=dict)
+    """OpenTodo only: repeating task id -> dates of its completed occurrence records."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +156,10 @@ def _plan_pair(p: Pair, tt: Snapshot, ot: Snapshot) -> list[Action]:
     if not tt_changed and not ot_changed:
         return []
 
+    occurrence = _completed_occurrence(p, tt_task, ot_task, ot, tt_changed, ot_changed)
+    if occurrence is not None:
+        return [occurrence]
+
     conflict = False
     if tt_changed and ot_changed:
         # TickTick wins, except that a completion on either side sticks.
@@ -206,6 +212,45 @@ def _plan_pair(p: Pair, tt: Snapshot, ot: Snapshot) -> list[Action]:
             )
         )
     return out
+
+
+def _completed_occurrence(
+    p: Pair, tt_task: Task, ot_task: Task, ot: Snapshot, tt_changed: bool, ot_changed: bool
+) -> Action | None:
+    """A repeating task completed in OpenTodo: complete it in TickTick, once.
+
+    OpenTodo doesn't mark the task completed: it moves it to its next date and records the
+    finished date as a separate, completed occurrence. Pushing the moved date would skip
+    TickTick's completion, so this completes the instance TickTick still shows (TickTick
+    then advances it itself) and leaves OpenTodo alone. The next pass sees TickTick's new
+    date and pushes it, so TickTick decides the next date.
+    """
+    base = p.base
+    if (
+        not ot_changed
+        or base is None
+        or base.due is None
+        or base.recurrence is None
+        or tt_task.completed
+        or ot_task.completed
+        or tt_task.due != base.due  # TickTick already moved on (completed there too)
+        or ot_task.due == base.due
+        or base.due.date not in ot.completed_occurrences.get(p.ot_id, set())
+    ):
+        return None
+    # TickTick wins a conflict; otherwise OpenTodo's other edits go along (at the old date).
+    source = tt_task if tt_changed else replace(ot_task, due=base.due)
+    done = replace(source, completed=True)
+    return Action(
+        Kind.UPDATE_TT,
+        tt_id=p.tt_id,
+        ot_id=p.ot_id,
+        task=done,
+        ot_hash=ot_task.content_hash(),
+        completes=True,
+        conflict=tt_changed,
+        note=f"repeating task completed in OpenTodo for {base.due.date}",
+    )
 
 
 def destructive_count(actions: Sequence[Action]) -> int:

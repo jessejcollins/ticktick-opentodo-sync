@@ -2,8 +2,8 @@
 
 Two-way task sync between **TickTick** (primary, wins every conflict) and a self-hosted **OpenTodo**. It runs as a small, locked-down Docker Compose service on a Raspberry Pi next to Pi-hole and makes one pass every 5 minutes.
 
-- Syncs title, notes, due date/time/zone, priority, tags ↔ labels, completion, and list ↔ project.
-- Not synced in v1: subtasks/checklists, recurrence rules (only the current instance's due date), reminders, attachments, comments, habits.
+- Syncs title, notes, due date/time/zone, priority, tags ↔ labels, completion, list ↔ project, and repeat rules.
+- Not synced: subtasks/checklists, reminders, attachments, comments, habits.
 - Rules, decisions and constraints: [CLAUDE.md](CLAUDE.md). API details and the field-mapping table: [docs/api-notes.md](docs/api-notes.md).
 
 ## Setup on the Pi
@@ -100,7 +100,8 @@ docker compose run --rm ticktick-opentodo-sync --apply --allow-bulk
 - **Conflicts:** if both sides changed, TickTick's version overwrites OpenTodo (logged as `WARNING … [conflict]`). Completion is the exception: a task completed on either side stays completed.
 - **Deletes:** deleting in TickTick deletes in OpenTodo (soft delete, into OpenTodo's Trash). Deleting in OpenTodo deletes in TickTick, unless the task was also edited in TickTick since the last pass; then it is recreated in OpenTodo.
 - **Completed tasks:** TickTick's API only lists open tasks. When a paired task disappears, ticktick-opentodo-sync fetches it once to tell *completed* from *deleted*. TickTick's **Won't Do** counts as completed.
-- **Recurring TickTick tasks:** completing one in OpenTodo completes it in TickTick. TickTick advances it, and the next pass reopens the OpenTodo task with the new due date.
+- **Repeat rules** sync both ways. TickTick's iCalendar rules are translated to OpenTodo's wording (`every 1st saturday of november`, `every 2 weeks after completion`) exactly as OpenTodo's own converter does. A rule OpenTodo can't express stays in TickTick, and that task syncs only its due date. Check before a first run: `docker compose run --rm ticktick-opentodo-sync --recurrence-report` (read-only).
+- **Completing a repeating task:** in OpenTodo, it completes the task once in TickTick. TickTick then picks the next date, and OpenTodo follows on the next pass. In TickTick, OpenTodo just moves to the next date. Skipping in OpenTodo moves the TickTick date.
 - **Priority:** TickTick none/low/medium/high (`0/1/3/5`) ↔ OpenTodo `4/3/2/1`.
 - **Out of scope** (left alone): closed TickTick lists, archived OpenTodo projects, subtasks on either side, OpenTodo habits and recurrence occurrences.
 - **Project renames** aren't synced. Pairs are kept by ID after the first match by name.

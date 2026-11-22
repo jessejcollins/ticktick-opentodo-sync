@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from ticktick_opentodo_sync.mapping import (
@@ -129,7 +131,13 @@ def test_from_tt_and_to_tt() -> None:
     }
     task = m.from_tt(raw)
     assert task == Task(
-        "Paint", INBOX, "two litres", Due("2026-11-20"), Priority.MEDIUM, frozenset({"errands"})
+        "Paint",
+        INBOX,
+        "two litres",
+        Due("2026-11-20"),
+        Priority.MEDIUM,
+        frozenset({"errands"}),
+        recurrence="every day",
     )
     out = m.to_tt(task, raw)
     assert out["projectId"] == "inbox1" and out["repeatFlag"] == "RRULE:FREQ=DAILY"
@@ -185,6 +193,7 @@ def test_from_ot_and_to_ot() -> None:
         "priority": 1,
         "due": {"date": "2026-11-20", "time": "10:00", "tz": NY},
         "labels": ["l1"],
+        "recurrence": None,
     }
 
 
@@ -203,3 +212,50 @@ def test_ot_inbox_and_pending_projects() -> None:
     assert m.ot_project_id("ot:new") == "new"
     with pytest.raises(ValueError, match="no TickTick list"):
         m.tt_project_id("ot:new")
+
+
+# --- recurrence (phase 2) --------------------------------------------------------------------
+
+
+def test_recurrence_to_tt_keeps_ticktick_spelling_and_untranslatable_rules() -> None:
+    m = make_mapper()
+    raw = {
+        "projectId": "ttp",
+        "title": "Review",
+        "isAllDay": True,
+        "timeZone": NY,
+        "dueDate": "2026-11-23T05:00:00+0000",  # a Monday
+        "repeatFlag": "RRULE:FREQ=WEEKLY;WKST=SU;INTERVAL=1;BYDAY=MO",
+        "repeatFrom": "0",
+    }
+    task = m.from_tt(raw)
+    assert task.recurrence == "every monday"
+    out = m.to_tt(task, raw)
+    assert out["repeatFlag"] == raw["repeatFlag"]  # same rule: TickTick's spelling kept
+
+    out = m.to_tt(replace(task, recurrence="every 2 weeks after completion"), raw)
+    assert (out["repeatFlag"], out["repeatFrom"]) == ("RRULE:FREQ=WEEKLY;INTERVAL=2", "1")
+    assert m.to_tt(replace(task, recurrence=None), raw)["repeatFlag"] == ""
+
+    odd = raw | {"repeatFlag": "RRULE:FREQ=MONTHLY;BYMONTHDAY=6,10"}
+    t = m.from_tt(odd)
+    assert t.ticktick_only_rule
+    # OpenTodo can't hold it, so its "no rule" never clears TickTick's rule.
+    assert m.to_tt(replace(t, recurrence=None), odd)["repeatFlag"] == odd["repeatFlag"]
+    assert "recurrence" not in m.to_ot(t, {}, currently_completed=False, now_ms=1)
+
+
+def test_recurrence_to_ot_and_back() -> None:
+    m = make_mapper()
+    task = Task("Pay rent", "ttp", due=Due("2026-12-01"), recurrence="every 1st")
+    body = m.to_ot(task, {}, currently_completed=False, now_ms=1)
+    assert body["recurrence"] == "every 1st"
+    raw = {
+        "project_id": "otp",
+        "title": "Pay rent",
+        "recurrence": "every 1st",
+        "due": {"date": "2026-12-01"},
+    }
+    assert m.from_ot(raw) == task
+    done = m.to_ot(replace(task, completed=True), {}, currently_completed=False, now_ms=1)
+    assert done["completed_at"] == 1 and done["recurrence"] is None

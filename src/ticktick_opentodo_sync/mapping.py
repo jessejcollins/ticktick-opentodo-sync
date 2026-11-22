@@ -12,7 +12,8 @@ from datetime import UTC, date, datetime, time
 from functools import cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .models import INBOX, JSON, PENDING_PREFIX, Due, Priority, Task
+from . import recurrence
+from .models import INBOX, JSON, PENDING_PREFIX, TICKTICK_ONLY_PREFIX, Due, Priority, Task
 
 log = logging.getLogger(__name__)
 
@@ -131,6 +132,45 @@ def due_to_ot(due: Due | None) -> JSON | None:
     return due.to_json() if due else None
 
 
+# --- recurrence -----------------------------------------------------------------------------
+
+
+def recurrence_from_tt(raw: JSON, due: Due | None) -> str | None:
+    """OpenTodo rule for a TickTick task, ``ticktick-only:...`` if inexpressible, else None."""
+    flag = raw.get("repeatFlag")
+    if not flag:
+        return None
+    t = recurrence.from_ticktick(str(flag), raw.get("repeatFrom"), _due_date(due))
+    if t.rule is None:
+        return f"{TICKTICK_ONLY_PREFIX}{flag};FROM={raw.get('repeatFrom')}"
+    return t.rule
+
+
+def _due_date(due: Due | None) -> date | None:
+    return date.fromisoformat(due.date) if due else None
+
+
+def recurrence_to_tt(task: Task, raw: JSON | None) -> JSON:
+    """TickTick ``repeatFlag``/``repeatFrom`` to write, or {} to leave the current rule alone.
+
+    TickTick's own spelling is kept whenever it already means the same rule, and a rule
+    OpenTodo can't express (``ticktick-only``) is never cleared from the OpenTodo side.
+    """
+    current = recurrence_from_tt(raw or {}, task.due)
+    if task.recurrence == current or task.ticktick_only_rule:
+        return {}
+    if task.recurrence is None:
+        if current is not None and current.startswith(TICKTICK_ONLY_PREFIX):
+            return {}
+        return {"repeatFlag": ""}  # verified 2026-11-22: "" clears the rule
+    try:
+        flag, frm = recurrence.to_ticktick(task.recurrence)
+    except recurrence.Untranslatable as exc:
+        log.warning("leaving the TickTick rule alone: %s", exc)
+        return {}
+    return {"repeatFlag": flag, "repeatFrom": frm}
+
+
 # --- project reconciliation -----------------------------------------------------------------
 
 
@@ -229,14 +269,16 @@ class Mapper:
 
     def from_tt(self, raw: JSON) -> Task:
         notes = raw.get("desc") if raw.get("kind") == "CHECKLIST" else raw.get("content")
+        due = due_from_tt(raw, self.default_tz)
         return Task(
             title=norm_title(raw.get("title")),
             project=self.tt_project_key(str(raw.get("projectId") or INBOX)),
             notes=norm_notes(notes),
-            due=due_from_tt(raw, self.default_tz),
+            due=due,
             priority=priority_from_tt(raw.get("priority")),
             tags=norm_tags(raw.get("tags")),
             completed=raw.get("status") in TT_DONE,
+            recurrence=recurrence_from_tt(raw, due),
         )
 
     def to_tt(self, task: Task, raw: JSON | None = None) -> JSON:
@@ -264,6 +306,7 @@ class Mapper:
             or parse_tt_datetime(old_start) > parse_tt_datetime(new_due)
         ):
             out["startDate"] = new_due
+        out |= recurrence_to_tt(task, raw)
         return out
 
     # OpenTodo ---------------------------------------------------------------------------
@@ -294,6 +337,7 @@ class Mapper:
             priority=priority_from_ot(raw.get("priority")),
             tags=frozenset(self.label_names[i] for i in labels if i in self.label_names),
             completed=raw.get("completed_at") is not None,
+            recurrence=str(raw["recurrence"]) if raw.get("recurrence") else None,
         )
 
     def to_ot(
@@ -313,8 +357,12 @@ class Mapper:
             "labels": sorted(label_ids[t] for t in task.tags if t in label_ids),
             "project_id": self.ot_project_id(task.project),
         }
+        if not task.ticktick_only_rule:
+            out["recurrence"] = task.recurrence
         if task.completed and not currently_completed:
             out["completed_at"] = now_ms
+            # A REST completion of a repeating task only advances it; TickTick says it's done.
+            out["recurrence"] = None
         elif not task.completed and currently_completed:
             out["completed_at"] = None
         return out

@@ -2,7 +2,7 @@
 
     ticktick-opentodo-sync [--dry-run|--apply] [--loop [SECONDS]] [--allow-bulk]
     ticktick-opentodo-sync --match-existing [--dry-run|--apply]
-    ticktick-opentodo-sync --status | --health
+    ticktick-opentodo-sync --status | --health | --recurrence-report
 
 Exit codes: 0 ok, 1 errors, 2 bad config, 3 blocked (bulk guard / first-sync guard / lock).
 """
@@ -80,6 +80,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--match-existing",
         action="store_true",
         help="one-time: pair existing tasks by project + exact title, then exit",
+    )
+    cmd.add_argument(
+        "--recurrence-report",
+        action="store_true",
+        help="report how TickTick repeat rules would translate to OpenTodo; writes nothing",
     )
     cmd.add_argument("--status", action="store_true", help="print state summary and exit")
     cmd.add_argument(
@@ -309,6 +314,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.match_existing:
             with file_lock(cfg.lock_path, timeout=120):
                 syncer.match_existing(dry_run=dry_run)
+            return EXIT_OK
+        if args.recurrence_report:
+            for line in syncer.recurrence_report().lines():
+                log.info("%s", line)
             return EXIT_OK
         if args.loop is not None:
             return _loop(cfg, syncer, args, dry_run)

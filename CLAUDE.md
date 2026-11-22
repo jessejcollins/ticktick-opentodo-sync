@@ -88,6 +88,15 @@ ticktick-opentodo-sync/
 4. Set `TICKTICK_OPENTODO_SYNC_DRY_RUN=false` and `docker compose up -d`.
 5. **Once the sync has run cleanly for a while, purge OpenTodo's plaintext history** (`POST /api/v1/encryption/purge-history`, or the button in OpenTodo's encryption settings). It still holds unencrypted copies of every task from the 2026-11-21 seed run. Don't purge before then: that history was the recovery source for the incident in the decisions log.
 
+## To review later
+
+Open items parked on 2026-11-22. Raise them when relevant; don't act on them unasked.
+
+- **Purge OpenTodo's plaintext history** (rollout step 5): once the sync has run cleanly for a while.
+- **Subtasks of repeating tasks in OpenTodo aren't unticked when the task repeats.** OpenTodo's app (`web/src/lib/ops.ts` `completeTask`, checked at commit `229c34b`) records the occurrence and moves the task on without touching its subtasks, and has no setting for it. While TickTick is primary this doesn't matter: TickTick unticks its checklist and the sync copies that over. Before dropping TickTick, pick one:
+  - ask OpenTodo for the feature ("untick subtasks when a repeating task moves to its next occurrence"), or
+  - make the sync untick a task's subtasks when it sees a completed OpenTodo occurrence (OpenTodo-only mode).
+
 ## Decisions log
 
 Answers to questions asked during the build (2026-11-21). Treat as settled.

@@ -13,10 +13,19 @@ from typing import Any, Protocol
 from . import engine, recurrence
 from .engine import Action, Kind, Pair, Snapshot
 from .http import ApiError
-from .mapping import TT_DONE, Mapper, ProjectInfo, reconcile_projects
+from .mapping import (
+    TT_DONE,
+    TT_DROP_ON_MERGE,
+    TT_ITEM_DONE,
+    Mapper,
+    ProjectInfo,
+    item_from_ot,
+    item_from_tt,
+    reconcile_projects,
+)
 from .models import INBOX, JSON, PENDING_PREFIX, Task, changed_fields
 from .opentodo import PLACEHOLDER, UNREADABLE
-from .state import State
+from .state import ITEMS, State
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +74,9 @@ class PassResult:
     dry_run: bool
     tt: SideCounts = field(default_factory=SideCounts)
     ot: SideCounts = field(default_factory=SideCounts)
+    tt_items: SideCounts = field(default_factory=SideCounts)
+    ot_items: SideCounts = field(default_factory=SideCounts)
+    """Checklist items (TickTick) / their subtasks (OpenTodo)."""
     conflicts: int = 0
     errors: int = 0
     blocked: str | None = None
@@ -74,7 +86,8 @@ class PassResult:
 
     @property
     def changed(self) -> bool:
-        return any(asdict(self.tt).values()) or any(asdict(self.ot).values())
+        sides = (self.tt, self.ot, self.tt_items, self.ot_items)
+        return any(any(asdict(c).values()) for c in sides)
 
     @property
     def ok(self) -> bool:
@@ -84,6 +97,7 @@ class PassResult:
         prefix = "DRY-RUN " if self.dry_run else ""
         line = (
             f"{prefix}TickTick: {self.tt} | OpenTodo: {self.ot} | "
+            f"items TickTick: {self.tt_items} | items OpenTodo: {self.ot_items} | "
             f"conflicts={self.conflicts} errors={self.errors}"
         )
         if self.blocked:
@@ -110,6 +124,10 @@ class World:
     """Lowercased label name -> OpenTodo label id."""
     project_names: dict[str, str] = field(default_factory=dict)
     """Project key -> display name (for logs)."""
+    item_pairs: dict[str, Pair] = field(default_factory=dict)
+    tt_items: Snapshot = field(default_factory=Snapshot)
+    ot_items: Snapshot = field(default_factory=Snapshot)
+    tt_item_raw: dict[str, JSON] = field(default_factory=dict)
 
 
 class SyncRefusedError(Exception):
@@ -185,10 +203,14 @@ class Syncer:
             ot=Snapshot(),
             pairs={p.tt_id: p for p in self.state.pairs()},
             project_names=names,
+            item_pairs={p.tt_id: p for p in self.state.pairs(ITEMS)},
         )
+        for pair in world.pairs.values():
+            mapper.link_task(pair.tt_id, pair.ot_id)
         self._collect_tt(world, [pid for pid in tt_projects if pid in in_scope], in_scope, dry_run)
-        self._collect_ot(world, in_scope)
+        children = self._collect_ot(world, in_scope)
         self._resolve_missing_tt(world, in_scope)
+        self._collect_subtasks(world, children, in_scope)
         return world
 
     def _reconcile_projects(
@@ -251,14 +273,25 @@ class Syncer:
             for raw in tasks:
                 w.tt_raw[str(raw["id"])] = raw
 
-        for tid, raw in w.tt_raw.items():
+        # Top-level tasks first, then subtasks of in-scope top-level tasks (one level deep).
+        for tid, raw in sorted(w.tt_raw.items(), key=lambda kv: bool(kv[1].get("parentId"))):
             task = self._normalize(w.mapper.from_tt, raw, "TickTick", tid)
-            if task is None or raw.get("parentId") or task.project not in in_scope:
+            parent = raw.get("parentId")
+            if (
+                task is None
+                or task.project not in in_scope
+                or (parent and not self._top_level_tt(w, str(parent)))
+            ):
                 w.tt.out_of_scope.add(tid)
             else:
                 w.tt.tasks[tid] = task
 
-    def _collect_ot(self, w: World, in_scope: set[str]) -> None:
+    @staticmethod
+    def _top_level_tt(w: World, tt_id: str) -> bool:
+        return tt_id in w.tt.tasks and not w.tt_raw.get(tt_id, {}).get("parentId")
+
+    def _collect_ot(self, w: World, in_scope: set[str]) -> list[JSON]:
+        """Top-level OpenTodo tasks; returns the open subtasks for :meth:`_collect_subtasks`."""
         unreadable_labels: set[str] = set()
         for label in self.ot.labels():
             if label.get("deleted_at") is not None or not label.get("id"):
@@ -273,12 +306,14 @@ class Syncer:
                 w.mapper.label_names[str(label["id"])] = name
                 w.label_ids.setdefault(name, str(label["id"]))
 
+        children: list[JSON] = []
         for raw in self.ot.tasks():
             oid = str(raw.get("id") or "")
             if not oid:
                 continue
             if raw.get("deleted_at") is not None:
                 w.ot.deleted.add(oid)
+                w.ot_items.deleted.add(oid)
                 continue
             if raw.get("series_id") and raw.get("completed_at") and not raw.get("skipped"):
                 occ = raw.get("occurrence_date")
@@ -286,8 +321,11 @@ class Syncer:
                     w.ot.completed_occurrences.setdefault(str(raw["series_id"]), set()).add(
                         str(occ)
                     )
-            if raw.get("parent_id") or raw.get("series_id") or raw.get("habit"):
+            if raw.get("series_id") or raw.get("habit"):
                 w.ot.out_of_scope.add(oid)
+                continue
+            if raw.get("parent_id"):
+                children.append(raw)
                 continue
             if _unreadable(raw, "title") or unreadable_labels.intersection(raw.get("labels") or []):
                 # Never let unreadable content look like an edit (or a deletion).
@@ -300,6 +338,69 @@ class Syncer:
                 w.ot.out_of_scope.add(oid)
             else:
                 w.ot.tasks[oid] = task
+        return children
+
+    def _items_in_scope(self, w: World, tt_parent: str) -> bool:
+        """Checklist items sync only while the parent is open, paired and in scope on both sides."""
+        tt_task = w.tt.tasks.get(tt_parent)
+        pair = w.pairs.get(tt_parent)
+        ot_task = w.ot.tasks.get(pair.ot_id) if pair else None
+        return (
+            tt_task is not None
+            and ot_task is not None
+            and not tt_task.completed
+            and not ot_task.completed
+            and not w.tt_raw.get(tt_parent, {}).get("parentId")
+        )
+
+    def _collect_subtasks(self, w: World, children: list[JSON], in_scope: set[str]) -> None:
+        """OpenTodo subtasks become items or subtasks; TickTick checklist items are read."""
+        item_ot_ids = {p.ot_id: p for p in w.item_pairs.values()}
+        task_ot_ids = {p.ot_id for p in w.pairs.values()}
+        for raw in children:
+            oid, parent_ot = str(raw["id"]), str(raw["parent_id"])
+            parent_tt = w.mapper.ot_to_tt_task.get(parent_ot)
+            parent_raw = w.ot_raw.get(parent_ot)
+            kind = (w.tt_raw.get(parent_tt or "") or {}).get("kind")
+            is_item = oid in item_ot_ids or (
+                oid not in task_ot_ids and parent_tt is not None and kind == "CHECKLIST"
+            )
+            if (
+                parent_raw is None  # parent out of scope
+                or parent_raw.get("parent_id")  # a deeper level
+                or parent_tt is None  # parent not in TickTick yet: next pass
+                or _unreadable(raw, "title")
+            ):
+                w.ot.out_of_scope.add(oid)
+                w.ot_items.out_of_scope.add(oid)
+                continue
+            if is_item:
+                pair = item_ot_ids.get(oid)
+                if pair is not None and pair.tt_project != parent_tt:
+                    log.warning("OpenTodo subtask %s moved to another task; not synced", oid)
+                    w.ot_items.out_of_scope.add(oid)
+                elif self._items_in_scope(w, parent_tt):
+                    w.ot_items.tasks[oid] = item_from_ot(raw, parent_tt)
+                else:
+                    w.ot_items.out_of_scope.add(oid)
+                continue
+            w.ot_raw[oid] = raw
+            task = self._normalize(w.mapper.from_ot, raw, "OpenTodo", oid)
+            if task is None or task.project not in in_scope or parent_tt not in w.tt.tasks:
+                w.ot.out_of_scope.add(oid)
+            else:
+                w.ot.tasks[oid] = task
+
+        for parent, raw in w.tt_raw.items():
+            if parent in w.tt.tasks and self._items_in_scope(w, parent):
+                for item in raw.get("items") or []:
+                    if isinstance(item, dict) and item.get("id"):
+                        w.tt_item_raw[str(item["id"])] = item
+                        w.tt_items.tasks[str(item["id"])] = item_from_tt(item, parent)
+        for p in w.item_pairs.values():
+            if not self._items_in_scope(w, p.tt_project):
+                w.tt_items.out_of_scope.add(p.tt_id)
+                w.ot_items.out_of_scope.add(p.ot_id)
 
     def _resolve_missing_tt(self, w: World, in_scope: set[str]) -> None:
         """Paired TickTick tasks absent from the undone lists: completed, deleted, or moved?"""
@@ -316,7 +417,7 @@ class Syncer:
                 w.tt.deleted.add(p.tt_id)
                 continue
             task = self._normalize(w.mapper.from_tt, raw, "TickTick", p.tt_id)
-            if task is None or raw.get("parentId"):
+            if task is None or (raw.get("parentId") and raw["parentId"] not in w.tt.tasks):
                 w.tt.out_of_scope.add(p.tt_id)
             elif raw.get("status") in TT_DONE or task.project in in_scope:
                 w.tt_raw[p.tt_id] = raw
@@ -351,7 +452,13 @@ class Syncer:
                     return res
 
         actions = engine.plan(w.pairs.values(), w.tt, w.ot)
-        n_destructive = engine.destructive_count(actions)
+        # Parents before their subtasks, so a new subtask's parent exists when it is created.
+        actions.sort(key=lambda a: a.task is not None and a.task.parent is not None)
+        item_actions = self._plan_items(w, actions)
+        # Item deletions in TickTick (the source of truth) count; OpenTodo's copies don't.
+        n_destructive = engine.destructive_count(actions) + sum(
+            a.kind is Kind.DELETE_TT for a in item_actions
+        )
         if n_destructive > self.max_destructive and not allow_bulk:
             res.blocked = (
                 f"{n_destructive} deletes/completions exceed "
@@ -362,6 +469,9 @@ class Syncer:
             for a in actions:
                 if a.destructive:
                     log.warning("  blocked: %s", self._describe(a, w))
+            for a in item_actions:
+                if a.kind is Kind.DELETE_TT:
+                    log.warning("  blocked: %s", self._describe_item(a, w))
             if not dry_run:
                 self.state.set_meta_json(
                     "blocked", {"at": self.now_ms(), "count": n_destructive, "reason": res.blocked}
@@ -370,8 +480,11 @@ class Syncer:
 
         for a in actions:
             self._apply(a, w, res, dry_run=dry_run)
+        self._apply_items(item_actions, w, res, dry_run=dry_run)
 
         if not dry_run:
+            if dropped := self.state.drop_orphan_items():
+                log.info("forgot %d checklist item pair(s) of tasks no longer synced", dropped)
             self.state.set_meta("blocked", None)
             if res.changed or res.errors:
                 self.state.set_meta_json("last_change", {"at": self.now_ms()} | res.to_json())
@@ -437,6 +550,7 @@ class Syncer:
             body, idempotency_key=f"ticktick-opentodo-sync-{a.tt_id}-{self.run_id}"
         )
         ot_id = str(resp["id"])
+        w.mapper.link_task(a.tt_id, ot_id)
         raw = w.tt_raw.get(a.tt_id) or {}
         self.state.put_pair(
             Pair(
@@ -455,6 +569,7 @@ class Syncer:
         resp = self.tt.create_task(body)
         tt_id = str(resp["id"])
         w.tt_raw[tt_id] = resp
+        w.mapper.link_task(tt_id, a.ot_id)
         readback = self._normalize(w.mapper.from_tt, resp, "TickTick", tt_id) or a.task
         self.state.put_pair(
             Pair(
@@ -509,6 +624,10 @@ class Syncer:
         self.state.update_pair(
             a.tt_id, tt_hash=tt_hash, ot_hash=a.ot_hash, tt_project=target, base=a.task
         )
+        if a.occurrence:
+            # OpenTodo completed this occurrence's subtasks along with it; TickTick's checklist
+            # for the next occurrence is what counts, so it wins on the next pass.
+            self.state.resync_items_from_ticktick(a.tt_id)
 
     def _delete_ot(self, a: Action, w: World) -> None:
         assert a.tt_id and a.ot_id
@@ -527,6 +646,197 @@ class Syncer:
     def _rehash(self, a: Action, w: World) -> None:
         assert a.tt_id
         self.state.update_pair(a.tt_id, tt_hash=a.tt_hash, ot_hash=a.ot_hash, base=a.task)
+
+    # --- checklist items <-> OpenTodo subtasks ----------------------------------------
+
+    def _plan_items(self, w: World, task_actions: list[Action]) -> list[Action]:
+        actions = engine.plan(
+            w.item_pairs.values(),
+            w.tt_items,
+            w.ot_items,
+            create_completed=True,
+            completion_sticks=False,
+        )
+        # A repeating parent completed in OpenTodo this pass: its items are resynced from
+        # TickTick once TickTick has moved on (see _update_tt), not now.
+        skip = {a.tt_id for a in task_actions if a.occurrence}
+        return [a for a in actions if self._item_parent(a, w) not in skip]
+
+    @staticmethod
+    def _item_parent(a: Action, w: World) -> str:
+        pair = w.item_pairs.get(a.tt_id or "")
+        if pair is not None:
+            return pair.tt_project
+        assert a.task is not None
+        return a.task.project
+
+    def _describe_item(self, a: Action, w: World) -> str:
+        parent = self._item_parent(a, w)
+        parent_title = w.tt.tasks[parent].title if parent in w.tt.tasks else parent
+        title = a.task.title if a.task else "?"
+        state = " [done]" if a.task and a.task.completed else ""
+        flags = " [conflict]" if a.conflict else ""
+        return f"{a.kind.value} item {title!r}{state} of {parent_title!r}{flags}: {a.note}"
+
+    def _apply_items(
+        self, actions: list[Action], w: World, res: PassResult, *, dry_run: bool
+    ) -> None:
+        to_tt: dict[str, list[Action]] = {}
+        for a in actions:
+            if dry_run:
+                if a.kind is not Kind.REHASH:
+                    log.info("DRY-RUN would %s", self._describe_item(a, w))
+                _count_item(a, res)
+            elif a.kind in (Kind.CREATE_TT, Kind.UPDATE_TT, Kind.DELETE_TT):
+                to_tt.setdefault(self._item_parent(a, w), []).append(a)
+            else:
+                self._apply_item_ot(a, w, res)
+        for parent, group in to_tt.items():
+            try:
+                self._apply_items_tt(parent, group, w)
+            except Exception as exc:
+                res.errors += len(group)
+                log.error("failed to update checklist of %s: %s", parent, exc)  # noqa: TRY400
+                log.debug("traceback", exc_info=True)
+                continue
+            for a in group:
+                log.info("%s", self._describe_item(a, w))
+                _count_item(a, res)
+
+    def _apply_item_ot(self, a: Action, w: World, res: PassResult) -> None:
+        try:
+            if a.kind is Kind.CREATE_OT:
+                self._create_item_ot(a, w)
+            elif a.kind is Kind.UPDATE_OT:
+                assert a.tt_id and a.ot_id and a.task
+                body: JSON = {"title": a.task.title}
+                current = w.ot_items.tasks[a.ot_id]
+                if a.task.completed != current.completed:
+                    body["completed_at"] = self.now_ms() if a.task.completed else None
+                resp = self.ot.update_task(a.ot_id, body)
+                readback = item_from_ot(resp, a.task.project) if resp.get("id") else a.task
+                self.state.update_pair(
+                    a.tt_id,
+                    ot_hash=readback.content_hash(),
+                    tt_hash=a.tt_hash,
+                    base=a.task,
+                    table=ITEMS,
+                )
+            elif a.kind is Kind.DELETE_OT:
+                assert a.tt_id and a.ot_id
+                self.ot.delete_task(a.ot_id)
+                self.state.delete_pair(a.tt_id, table=ITEMS)
+            elif a.kind is Kind.FORGET:
+                assert a.tt_id
+                self.state.delete_pair(a.tt_id, table=ITEMS)
+            elif a.kind is Kind.REHASH:
+                assert a.tt_id
+                self.state.update_pair(
+                    a.tt_id, tt_hash=a.tt_hash, ot_hash=a.ot_hash, base=a.task, table=ITEMS
+                )
+        except Exception as exc:
+            res.errors += 1
+            log.error("failed to %s: %s", self._describe_item(a, w), exc)  # noqa: TRY400
+            log.debug("traceback", exc_info=True)
+            return
+        if a.kind is not Kind.REHASH:
+            log.info("%s", self._describe_item(a, w))
+        _count_item(a, res)
+
+    def _create_item_ot(self, a: Action, w: World) -> None:
+        assert a.tt_id and a.task
+        parent_tt = a.task.project
+        parent_ot = w.mapper.tt_to_ot_task[parent_tt]
+        parent_raw = w.ot_raw.get(parent_ot) or {}
+        item = w.tt_item_raw.get(a.tt_id) or {}
+        body: JSON = {
+            "title": a.task.title,
+            "parent_id": parent_ot,
+            "project_id": parent_raw.get("project_id"),
+        }
+        if isinstance(item.get("sortOrder"), int | float):
+            body["position"] = item["sortOrder"]
+        if a.task.completed:
+            body["completed_at"] = self.now_ms()
+        resp = self.ot.create_task(
+            body, idempotency_key=f"ticktick-opentodo-sync-item-{a.tt_id}-{self.run_id}"
+        )
+        self.state.put_pair(
+            Pair(
+                tt_id=a.tt_id,
+                ot_id=str(resp["id"]),
+                tt_hash=a.tt_hash or a.task.content_hash(),
+                ot_hash=item_from_ot(resp, parent_tt).content_hash(),
+                tt_project=parent_tt,
+                base=a.task,
+            ),
+            table=ITEMS,
+        )
+
+    def _apply_items_tt(self, parent: str, group: list[Action], w: World) -> None:
+        """All of one task's item changes in one TickTick write (items live in the task)."""
+        pair = w.pairs[parent]
+        project = str((w.tt_raw.get(parent) or {}).get("projectId") or pair.tt_project)
+        raw = self.tt.get_task(project, parent)  # fresh: a task action may have written it
+        if raw is None or raw.get("status") in TT_DONE:
+            raise RuntimeError("the TickTick task is gone or no longer open")
+        items: list[JSON] = [dict(i) for i in raw.get("items") or [] if isinstance(i, dict)]
+        by_id = {str(i.get("id")): i for i in items}
+        old_ids = set(by_id)
+        creates: list[Action] = []
+        next_order = max((i.get("sortOrder") or 0 for i in items), default=0)
+        for a in group:
+            assert a.tt_id or a.kind is Kind.CREATE_TT
+            if a.kind is Kind.DELETE_TT:
+                items = [i for i in items if str(i.get("id")) != a.tt_id]
+            elif a.kind is Kind.UPDATE_TT:
+                assert a.task and a.tt_id
+                if (item := by_id.get(a.tt_id)) is None:
+                    raise RuntimeError(f"checklist item {a.tt_id} no longer exists")
+                item["title"] = a.task.title
+                item["status"] = TT_ITEM_DONE if a.task.completed else 0
+            else:
+                assert a.task
+                next_order += 1
+                status = TT_ITEM_DONE if a.task.completed else 0
+                items.append({"title": a.task.title, "status": status, "sortOrder": next_order})
+                creates.append(a)
+        body = {k: v for k, v in raw.items() if k not in TT_DROP_ON_MERGE} | {"items": items}
+        resp = self.tt.update_task(parent, body)
+        if not isinstance(resp.get("items"), list):
+            resp = self.tt.get_task(project, parent) or {}
+        after = {str(i.get("id")): i for i in resp.get("items") or [] if isinstance(i, dict)}
+        new_items = [i for iid, i in after.items() if iid not in old_ids]
+        for a in group:
+            if a.kind is Kind.DELETE_TT:
+                assert a.tt_id
+                self.state.delete_pair(a.tt_id, table=ITEMS)
+            elif a.kind is Kind.UPDATE_TT:
+                assert a.tt_id and a.task
+                got = after.get(a.tt_id)
+                tt_hash = item_from_tt(got, parent).content_hash() if got else ""
+                self.state.update_pair(
+                    a.tt_id, tt_hash=tt_hash, ot_hash=a.ot_hash, base=a.task, table=ITEMS
+                )
+        for a in creates:
+            assert a.task and a.ot_id
+            match = next(
+                (i for i in new_items if (i.get("title") or "").strip() == a.task.title), None
+            )
+            if match is None:
+                raise RuntimeError(f"TickTick did not return the new item {a.task.title!r}")
+            new_items.remove(match)
+            self.state.put_pair(
+                Pair(
+                    tt_id=str(match["id"]),
+                    ot_id=a.ot_id,
+                    tt_hash=item_from_tt(match, parent).content_hash(),
+                    ot_hash=a.ot_hash or a.task.content_hash(),
+                    tt_project=parent,
+                    base=a.task,
+                ),
+                table=ITEMS,
+            )
 
     # --- reports ----------------------------------------------------------------------
 
@@ -639,6 +949,19 @@ class RecurrenceReport:
                 f"  {label}: has {cur!r}, TickTick says {new!r}" for label, cur, new in self.differs
             ]
         return out
+
+
+def _count_item(a: Action, res: PassResult) -> None:
+    res.conflicts += a.conflict
+    side = (
+        res.ot_items if a.kind in (Kind.CREATE_OT, Kind.UPDATE_OT, Kind.DELETE_OT) else res.tt_items
+    )
+    if a.kind in (Kind.CREATE_OT, Kind.CREATE_TT):
+        side.created += 1
+    elif a.kind in (Kind.UPDATE_OT, Kind.UPDATE_TT):
+        side.updated += 1
+    elif a.kind in (Kind.DELETE_OT, Kind.DELETE_TT):
+        side.deleted += 1
 
 
 def _count(a: Action, res: PassResult) -> None:

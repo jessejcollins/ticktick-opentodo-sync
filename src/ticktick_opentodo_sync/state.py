@@ -1,4 +1,4 @@
-"""SQLite state: task id pairs with per-side hashes, the project map, and a few meta keys.
+"""SQLite state: task and checklist-item id pairs with per-side hashes, the project map, meta.
 
 Every write is its own short transaction, issued only when something changed.
 """
@@ -17,7 +17,11 @@ from typing import Any
 from .engine import Pair
 from .models import Task
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+TASKS = "pairs"
+ITEMS = "item_pairs"
+"""TickTick checklist item <-> OpenTodo subtask; ``tt_project`` is the TickTick parent task id."""
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -30,6 +34,15 @@ CREATE TABLE IF NOT EXISTS projects (
     name  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pairs (
+    tt_id      TEXT PRIMARY KEY,
+    ot_id      TEXT NOT NULL UNIQUE,
+    tt_hash    TEXT NOT NULL,
+    ot_hash    TEXT NOT NULL,
+    tt_project TEXT NOT NULL,
+    base       TEXT,
+    updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS item_pairs (
     tt_id      TEXT PRIMARY KEY,
     ot_id      TEXT NOT NULL UNIQUE,
     tt_hash    TEXT NOT NULL,
@@ -113,7 +126,7 @@ class State:
 
     # task pairs ------------------------------------------------------------------------
 
-    def pairs(self) -> list[Pair]:
+    def pairs(self, table: str = TASKS) -> list[Pair]:
         return [
             Pair(
                 tt_id=r["tt_id"],
@@ -123,20 +136,21 @@ class State:
                 tt_project=r["tt_project"],
                 base=Task.from_json(json.loads(r["base"])) if r["base"] else None,
             )
-            for r in self.db.execute("SELECT * FROM pairs")
+            for r in self.db.execute(f"SELECT * FROM {_table(table)}")
         ]
 
-    def pair_count(self) -> int:
-        return int(self.db.execute("SELECT COUNT(*) FROM pairs").fetchone()[0])
+    def pair_count(self, table: str = TASKS) -> int:
+        return int(self.db.execute(f"SELECT COUNT(*) FROM {_table(table)}").fetchone()[0])
 
-    def put_pair(self, pair: Pair) -> None:
+    def put_pair(self, pair: Pair, table: str = TASKS) -> None:
         """Insert or replace the pair keyed by ``tt_id`` (also frees a reused ``ot_id``)."""
         with self.tx():
             self.db.execute(
-                "DELETE FROM pairs WHERE ot_id = ? AND tt_id != ?", (pair.ot_id, pair.tt_id)
+                f"DELETE FROM {_table(table)} WHERE ot_id = ? AND tt_id != ?",
+                (pair.ot_id, pair.tt_id),
             )
             self.db.execute(
-                "INSERT OR REPLACE INTO pairs "
+                f"INSERT OR REPLACE INTO {_table(table)} "
                 "(tt_id, ot_id, tt_hash, ot_hash, tt_project, base, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -158,6 +172,7 @@ class State:
         ot_hash: str | None = None,
         tt_project: str | None = None,
         base: Task | None = None,
+        table: str = TASKS,
     ) -> None:
         sets: dict[str, object] = {
             k: v
@@ -170,10 +185,33 @@ class State:
             return
         sets["updated_at"] = int(time.time())
         cols = ", ".join(f"{k} = ?" for k in sets)
-        self.db.execute(f"UPDATE pairs SET {cols} WHERE tt_id = ?", (*sets.values(), tt_id))
+        self.db.execute(
+            f"UPDATE {_table(table)} SET {cols} WHERE tt_id = ?", (*sets.values(), tt_id)
+        )
 
-    def delete_pair(self, tt_id: str) -> None:
-        self.db.execute("DELETE FROM pairs WHERE tt_id = ?", (tt_id,))
+    def delete_pair(self, tt_id: str, table: str = TASKS) -> None:
+        self.db.execute(f"DELETE FROM {_table(table)} WHERE tt_id = ?", (tt_id,))
+
+    # checklist items -------------------------------------------------------------------
+
+    def resync_items_from_ticktick(self, tt_parent: str) -> None:
+        """Mark a parent's items changed on both sides, so TickTick's state wins next pass."""
+        self.db.execute(
+            "UPDATE item_pairs SET tt_hash = '', ot_hash = '' WHERE tt_project = ?", (tt_parent,)
+        )
+
+    def drop_orphan_items(self) -> int:
+        """Forget item pairs whose parent task pair is gone."""
+        cur = self.db.execute(
+            "DELETE FROM item_pairs WHERE tt_project NOT IN (SELECT tt_id FROM pairs)"
+        )
+        return cur.rowcount
+
+
+def _table(name: str) -> str:
+    if name not in (TASKS, ITEMS):
+        raise ValueError(f"unknown pair table {name!r}")
+    return name
 
 
 def _dump(task: Task | None) -> str | None:

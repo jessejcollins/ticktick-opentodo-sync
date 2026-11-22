@@ -248,6 +248,22 @@ class Mapper:
     tt_to_ot_project: dict[str, str] = field(default_factory=dict)
     label_names: dict[str, str] = field(default_factory=dict)
     """OpenTodo label id -> lowercased name."""
+    tt_to_ot_task: dict[str, str] = field(default_factory=dict)
+    ot_to_tt_task: dict[str, str] = field(default_factory=dict)
+    """Paired task ids, for subtask parents."""
+
+    def link_task(self, tt_id: str, ot_id: str) -> None:
+        self.tt_to_ot_task[tt_id] = ot_id
+        self.ot_to_tt_task[ot_id] = tt_id
+
+    def ot_task_id(self, key: str) -> str:
+        """OpenTodo id of a parent task key (see :attr:`Task.parent`)."""
+        if key.startswith(PENDING_PREFIX):
+            return key[len(PENDING_PREFIX) :]
+        try:
+            return self.tt_to_ot_task[key]
+        except KeyError:
+            raise ValueError(f"parent task {key} has no OpenTodo twin yet") from None
 
     @property
     def ot_to_tt_project(self) -> dict[str, str]:
@@ -279,6 +295,7 @@ class Mapper:
             tags=norm_tags(raw.get("tags")),
             completed=raw.get("status") in TT_DONE,
             recurrence=recurrence_from_tt(raw, due),
+            parent=str(raw["parentId"]) if raw.get("parentId") else None,
         )
 
     def to_tt(self, task: Task, raw: JSON | None = None) -> JSON:
@@ -307,6 +324,8 @@ class Mapper:
         ):
             out["startDate"] = new_due
         out |= recurrence_to_tt(task, raw)
+        if task.parent and not task.parent.startswith(PENDING_PREFIX):
+            out["parentId"] = task.parent
         return out
 
     # OpenTodo ---------------------------------------------------------------------------
@@ -338,7 +357,13 @@ class Mapper:
             tags=frozenset(self.label_names[i] for i in labels if i in self.label_names),
             completed=raw.get("completed_at") is not None,
             recurrence=str(raw["recurrence"]) if raw.get("recurrence") else None,
+            parent=self._ot_parent_key(raw.get("parent_id")),
         )
+
+    def _ot_parent_key(self, parent_id: object) -> str | None:
+        if not parent_id:
+            return None
+        return self.ot_to_tt_task.get(str(parent_id)) or PENDING_PREFIX + str(parent_id)
 
     def to_ot(
         self,
@@ -359,6 +384,8 @@ class Mapper:
         }
         if not task.ticktick_only_rule:
             out["recurrence"] = task.recurrence
+        if task.parent:
+            out["parent_id"] = self.ot_task_id(task.parent)
         if task.completed and not currently_completed:
             out["completed_at"] = now_ms
             # A REST completion of a repeating task only advances it; TickTick says it's done.
@@ -366,3 +393,17 @@ class Mapper:
         elif not task.completed and currently_completed:
             out["completed_at"] = None
         return out
+
+
+# --- checklist items <-> OpenTodo subtasks ----------------------------------------------------
+# An item is a Task with only title and completed set; ``project`` holds the TickTick parent id.
+
+TT_ITEM_DONE = 1
+
+
+def item_from_tt(item: JSON, parent: str) -> Task:
+    return Task(norm_title(item.get("title")), parent, completed=bool(item.get("status")))
+
+
+def item_from_ot(raw: JSON, parent: str) -> Task:
+    return Task(norm_title(raw.get("title")), parent, completed=raw.get("completed_at") is not None)

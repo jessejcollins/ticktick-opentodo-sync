@@ -64,6 +64,8 @@ class Task:
     completed: bool = False
     recurrence: str | None = None
     """OpenTodo rule (canonical, e.g. ``every monday``), ``ticktick-only:<RRULE>``, or None."""
+    parent: str | None = None
+    """Subtask: TickTick id of the parent task (``ot:<id>`` while it has no TickTick twin)."""
 
     def to_json(self) -> JSON:
         out: JSON = {
@@ -78,6 +80,8 @@ class Task:
         if self.recurrence is not None:
             # Only when set: tasks without a rule keep the hashes stored before phase 2.
             out["recurrence"] = self.recurrence
+        if self.parent is not None:
+            out["parent"] = self.parent
         return out
 
     @property
@@ -96,6 +100,7 @@ class Task:
             tags=frozenset(data.get("tags", ())),
             completed=bool(data.get("completed", False)),
             recurrence=data.get("recurrence"),
+            parent=data.get("parent"),
         )
 
     def content_hash(self) -> str:

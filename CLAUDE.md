@@ -44,10 +44,9 @@ TickTick is primary. For each task pair, keep a record of what each side looked 
 
 ### Fields (v1)
 
-Sync: title, notes/description, due date (+ time and time zone), priority (map TickTick's 0/1/3/5 onto OpenTodo's scale and document the mapping), tags, completed status, list/project, and (phase 2, 2026-11-22) recurrence rules.
+Sync: title, notes/description, due date (+ time and time zone), priority (map TickTick's 0/1/3/5 onto OpenTodo's scale and document the mapping), tags, completed status, list/project, and (phase 2, 2026-11-22) recurrence rules, subtasks and checklist items.
 
 Leave out of v1 (sync these later if wanted):
-- **Subtasks/checklist items.** Phase 2.
 - Attachments, comments, reminders, focus/pomodoro data, habits.
 
 ## API facts
@@ -107,7 +106,12 @@ Answers to questions asked during the build (2026-11-21). Treat as settled.
 - **Tags ↔ labels:** OpenTodo has no tags. It has labels, referenced by ID. They are matched by lowercase name, and missing labels are created.
 - **Priority mapping:** TickTick `0/1/3/5` (none/low/medium/high) ↔ OpenTodo `4/3/2/1` (1 is highest, 4 is the default).
 - **Conflicts:** TickTick wins every field except completion. A completion made on either side is never undone by a conflict ("Completed in either app" takes priority).
-- **Subtasks:** TickTick child tasks (`parentId`) and OpenTodo child tasks (`parent_id`) are out of scope in v1 and ignored on both sides.
+- **Subtasks (2026-11-22, replaces "out of scope in v1").** One level deep on both sides; deeper levels are ignored.
+  - TickTick **checklist items** ↔ OpenTodo **subtasks**, including checked items (as completed subtasks). Items have their own pair table (`item_pairs`; `tt_project` = TickTick parent id) and sync title and done state only. Order is copied on create (`sortOrder` → `position`), not afterwards. Items sync only while the parent is open and paired on both sides.
+  - TickTick **child tasks** (`parentId`) ↔ OpenTodo subtasks as full tasks (`Task.parent`).
+  - A **new OpenTodo subtask** becomes a checklist item under a TickTick CHECKLIST task, otherwise a TickTick child task (Jesse's choice: each app keeps its natural form). Subtasks of a brand-new parent follow one pass later.
+  - Item conflicts: TickTick wins outright, done state included (a repeating TickTick checklist resets its items, which must not be re-ticked from OpenTodo). After a repeating task is completed in OpenTodo, its items are resynced from TickTick on the next pass.
+  - The bulk guard counts item deletions in TickTick, not in OpenTodo (OpenTodo's copies can be recreated).
 - **Closed TickTick lists / archived OpenTodo projects** are out of scope. Their tasks are left alone.
 - **Recurrence (phase 2, 2026-11-22).** Rules sync both ways (`recurrence.py`, a port of OpenTodo's own RRULE converter). Report first with `--recurrence-report` (read-only).
   - A TickTick rule OpenTodo can't express exactly is kept in TickTick only (`ticktick-only:` in state) and never cleared from the OpenTodo side; that task syncs its due date only. If TickTick already holds the same rule in a different spelling, its spelling is kept.

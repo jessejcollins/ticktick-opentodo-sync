@@ -65,8 +65,16 @@ class FakeTickTick:
         t = self.tasks.get(task_id)
         return copy.deepcopy(t) if t else None
 
+    @staticmethod
+    def _item_ids(body: JSON) -> JSON:
+        """TickTick gives new checklist items an id."""
+        if isinstance(body.get("items"), list):
+            body = body | {"items": [{"id": _id("it")} | i for i in body["items"]]}
+        return body
+
     def create_task(self, body: JSON) -> JSON:
         self.writes.append(("create", body))
+        body = self._item_ids(body)
         tid = _id("tt")
         pid = self.inbox_id if body["projectId"] == "inbox" else body["projectId"]
         self.tasks[tid] = {"status": 0, "kind": "TEXT"} | body | {"id": tid, "projectId": pid}
@@ -74,7 +82,7 @@ class FakeTickTick:
 
     def update_task(self, task_id: str, body: JSON) -> JSON:
         self.writes.append(("update", body))
-        self.tasks[task_id] = self.tasks[task_id] | body
+        self.tasks[task_id] = self.tasks[task_id] | self._item_ids(body)
         return copy.deepcopy(self.tasks[task_id])
 
     def complete_task(self, project_id: str, task_id: str) -> None:

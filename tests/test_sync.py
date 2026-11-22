@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fakes import FakeOpenTodo, FakeTickTick
@@ -32,7 +33,7 @@ class Env:
         assert not res.changed and res.ok, res.summary()
         assert (len(self.tt.writes), len(self.ot.writes)) == (tt_w, ot_w)
 
-    def ot_by_title(self, title: str) -> dict[str, object]:
+    def ot_by_title(self, title: str) -> dict[str, Any]:
         return next(t for t in self.ot.tasks_.values() if t["title"] == title)
 
 
@@ -71,7 +72,7 @@ def test_seed_creates_everything_in_opentodo(env: Env) -> None:
     assert report["priority"] == 1
     assert report["description"] == "Q3 numbers"
     assert report["due"] == {"date": "2026-11-25", "time": "09:00", "tz": NY}
-    assert [env.ot.label_name(x) for x in report["labels"]] == ["office"]  # type: ignore[attr-defined]
+    assert [env.ot.label_name(x) for x in report["labels"]] == ["office"]
     assert env.state.pair_count() == 2
     assert env.state.get_meta("tt_inbox_id") == "inbox100"
     env.assert_quiet()
@@ -121,7 +122,7 @@ def test_edit_in_ticktick_pushes_to_opentodo(env: Env) -> None:
     env.tt.tasks[b]["tags"] = ["office", "urgent"]
     res = env.run()
     assert res.ot.updated == 1
-    names = sorted(env.ot.label_name(x) for x in env.ot_by_title("Report")["labels"])  # type: ignore[attr-defined]
+    names = sorted(env.ot.label_name(x) for x in env.ot_by_title("Report")["labels"])
     assert names == ["office", "urgent"]
     env.assert_quiet()
 
@@ -254,7 +255,7 @@ def test_closed_list_is_out_of_scope(env: Env) -> None:
     assert env.ot.projects_ == {} and env.ot.tasks_ == {}
 
 
-def test_subtasks_ignored(env: Env) -> None:
+def test_subtask_of_unknown_parent_ignored(env: Env) -> None:
     env.tt.add_task("child", parentId="someone")
     env.run()
     assert env.ot.tasks_ == {}
@@ -376,3 +377,137 @@ def test_tasks_without_rules_keep_their_pre_phase_2_hash() -> None:
     from ticktick_opentodo_sync.models import Task
 
     assert "recurrence" not in Task("x").to_json()
+
+
+# --- subtasks and checklist items ------------------------------------------------------------
+
+
+def _checklist(env: Env, **fields: Any) -> str:
+    tid = env.tt.add_task(
+        "Pack",
+        kind="CHECKLIST",
+        items=[
+            {"id": "i1", "title": "Socks", "status": 0, "sortOrder": 1},
+            {"id": "i2", "title": "Shirts", "status": 1, "sortOrder": 2},
+            {"id": "i3", "title": "Charger", "status": 0, "sortOrder": 3},
+        ],
+        **fields,
+    )
+    env.run()  # the task
+    env.run()  # its items, once the task is paired
+    return tid
+
+
+def subtasks(env: Env, parent_title: str) -> dict[str, dict[str, Any]]:
+    parent = env.ot_by_title(parent_title)["id"]
+    return {
+        str(t["title"]): t
+        for t in env.ot.tasks_.values()
+        if t["parent_id"] == parent and t["deleted_at"] is None
+    }
+
+
+def tt_items(env: Env, tid: str) -> dict[str, dict[str, Any]]:
+    return {str(i["title"]): i for i in env.tt.tasks[tid]["items"]}
+
+
+def test_checklist_items_become_subtasks(env: Env) -> None:
+    _checklist(env)
+    subs = subtasks(env, "Pack")
+    assert set(subs) == {"Socks", "Shirts", "Charger"}
+    assert subs["Shirts"]["completed_at"] is not None and subs["Socks"]["completed_at"] is None
+    assert [subs[t]["position"] for t in ("Socks", "Shirts", "Charger")] == [1, 2, 3]
+    env.assert_quiet()
+
+
+def test_checklist_changes_both_ways(env: Env) -> None:
+    tid = _checklist(env)
+    subtasks(env, "Pack")["Socks"]["completed_at"] = 1  # ticked in OpenTodo
+    res = env.run()
+    assert res.tt_items.updated == 1, res.summary()
+    assert tt_items(env, tid)["Socks"]["status"] == 1
+    env.assert_quiet()
+
+    tt_items(env, tid)["Charger"]["title"] = "USB-C charger"  # renamed in TickTick
+    env.run()
+    assert "USB-C charger" in subtasks(env, "Pack")
+    env.assert_quiet()
+
+    parent_ot = env.ot_by_title("Pack")
+    env.ot.add_task("Toothbrush", parent_ot["project_id"], parent_id=parent_ot["id"])
+    res = env.run()
+    assert res.tt_items.created == 1, res.summary()
+    assert tt_items(env, tid)["Toothbrush"]["status"] == 0
+    env.assert_quiet()
+
+    env.tt.tasks[tid]["items"] = [i for i in env.tt.tasks[tid]["items"] if i["title"] != "Shirts"]
+    env.run()
+    assert "Shirts" not in subtasks(env, "Pack")
+    env.assert_quiet()
+
+    subtasks(env, "Pack")["Toothbrush"]["deleted_at"] = 1
+    res = env.run()
+    assert res.tt_items.deleted == 1, res.summary()
+    assert "Toothbrush" not in tt_items(env, tid)
+    env.assert_quiet()
+
+
+def test_checklist_conflict_ticktick_wins_even_unticking(env: Env) -> None:
+    tid = _checklist(env)
+    tt_items(env, tid)["Shirts"]["status"] = 0
+    subtasks(env, "Pack")["Shirts"]["title"] = "Shirts!"
+    res = env.run()
+    assert res.conflicts == 1, res.summary()
+    shirts = subtasks(env, "Pack")["Shirts"]
+    assert shirts["completed_at"] is None
+    env.assert_quiet()
+
+
+def test_new_subtask_under_plain_task_becomes_ticktick_subtask(env: Env) -> None:
+    env.tt.add_task("Plan trip")
+    env.run()
+    parent_ot = env.ot_by_title("Plan trip")
+    env.ot.add_task("Book hotel", parent_ot["project_id"], parent_id=parent_ot["id"])
+    res = env.run()
+    assert res.tt.created == 1, res.summary()
+    child = next(t for t in env.tt.tasks.values() if t["title"] == "Book hotel")
+    parent_tt = next(t for t in env.tt.tasks.values() if t["title"] == "Plan trip")
+    assert child["parentId"] == parent_tt["id"]
+    env.assert_quiet()
+
+
+def test_ticktick_subtask_goes_to_opentodo(env: Env) -> None:
+    parent = env.tt.add_task("Plan trip")
+    env.tt.add_task("Book hotel", parentId=parent)
+    res = env.run()
+    assert res.ot.created == 2, res.summary()
+    assert env.ot_by_title("Book hotel")["parent_id"] == env.ot_by_title("Plan trip")["id"]
+    env.assert_quiet()
+
+
+def test_repeating_checklist_completed_in_opentodo(env: Env) -> None:
+    tid = _checklist(
+        env,
+        dueDate="2026-11-23T05:00:00+0000",
+        isAllDay=True,
+        timeZone=NY,
+        repeatFlag="RRULE:FREQ=WEEKLY;BYDAY=MO",
+        repeatFrom="0",
+    )
+    parent = env.ot_by_title("Pack")
+    # OpenTodo completes the occurrence: subtasks done, task moved on, occurrence recorded.
+    for sub in subtasks(env, "Pack").values():
+        sub["completed_at"] = 1
+    parent["due"] = {"date": "2026-11-30"}
+    env.ot.add_task(
+        "Pack", None, series_id=parent["id"], occurrence_date="2026-11-23", completed_at=1
+    )
+    res = env.run()
+    assert res.tt.completed == 1 and res.tt_items.updated == 0, res.summary()
+    # TickTick moves on and resets its checklist for the next occurrence.
+    for item in env.tt.tasks[tid]["items"]:
+        item["status"] = 0
+    env.run()
+    assert all(s["completed_at"] is None for s in subtasks(env, "Pack").values())
+    assert all(i["status"] == 0 for i in env.tt.tasks[tid]["items"])
+    env.assert_quiet()

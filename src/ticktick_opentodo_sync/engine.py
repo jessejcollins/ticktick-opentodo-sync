@@ -65,6 +65,8 @@ class Action:
     conflict: bool = False
     completes: bool = False
     """The write marks an open task completed (counts towards the bulk guard)."""
+    occurrence: bool = False
+    """Completes the TickTick instance of a repeating task completed in OpenTodo."""
     note: str = ""
 
     @property
@@ -72,17 +74,30 @@ class Action:
         return self.kind in (Kind.DELETE_OT, Kind.DELETE_TT) or self.completes
 
 
-def plan(pairs: Iterable[Pair], tt: Snapshot, ot: Snapshot) -> list[Action]:
+def plan(
+    pairs: Iterable[Pair],
+    tt: Snapshot,
+    ot: Snapshot,
+    *,
+    create_completed: bool = False,
+    completion_sticks: bool = True,
+) -> list[Action]:
+    """Actions for tasks (defaults) or checklist items.
+
+    Items are created even when already checked (``create_completed``), and on a conflict
+    TickTick wins outright, checked state included (``completion_sticks=False``): a repeating
+    TickTick checklist resets its items, which must not be re-checked from OpenTodo.
+    """
     actions: list[Action] = []
     pairs = list(pairs)
     paired_tt = {p.tt_id for p in pairs}
     paired_ot = {p.ot_id for p in pairs}
 
     for p in sorted(pairs, key=lambda p: p.tt_id):
-        actions.extend(_plan_pair(p, tt, ot))
+        actions.extend(_plan_pair(p, tt, ot, completion_sticks=completion_sticks))
 
     for tt_id, task in sorted(tt.tasks.items()):
-        if tt_id not in paired_tt and not task.completed:
+        if tt_id not in paired_tt and (create_completed or not task.completed):
             actions.append(
                 Action(
                     Kind.CREATE_OT,
@@ -93,7 +108,7 @@ def plan(pairs: Iterable[Pair], tt: Snapshot, ot: Snapshot) -> list[Action]:
                 )
             )
     for ot_id, task in sorted(ot.tasks.items()):
-        if ot_id not in paired_ot and not task.completed:
+        if ot_id not in paired_ot and (create_completed or not task.completed):
             actions.append(
                 Action(
                     Kind.CREATE_TT,
@@ -106,7 +121,9 @@ def plan(pairs: Iterable[Pair], tt: Snapshot, ot: Snapshot) -> list[Action]:
     return actions
 
 
-def _plan_pair(p: Pair, tt: Snapshot, ot: Snapshot) -> list[Action]:
+def _plan_pair(
+    p: Pair, tt: Snapshot, ot: Snapshot, *, completion_sticks: bool = True
+) -> list[Action]:
     if p.tt_id in tt.out_of_scope or p.ot_id in ot.out_of_scope:
         return []
 
@@ -163,7 +180,8 @@ def _plan_pair(p: Pair, tt: Snapshot, ot: Snapshot) -> list[Action]:
     conflict = False
     if tt_changed and ot_changed:
         # TickTick wins, except that a completion on either side sticks.
-        merged = replace(tt_task, completed=tt_task.completed or ot_task.completed)
+        sticks = completion_sticks and ot_task.completed
+        merged = replace(tt_task, completed=tt_task.completed or sticks)
         conflict = tt_task != ot_task
     elif tt_changed:
         merged = tt_task
@@ -248,6 +266,7 @@ def _completed_occurrence(
         task=done,
         ot_hash=ot_task.content_hash(),
         completes=True,
+        occurrence=True,
         conflict=tt_changed,
         note=f"repeating task completed in OpenTodo for {base.due.date}",
     )

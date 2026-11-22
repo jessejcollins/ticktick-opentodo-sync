@@ -46,6 +46,7 @@ Base: `https://api.ticktick.com`
 - Dates are formatted `yyyy-MM-dd'T'HH:mm:ssZ`, e.g. `2019-11-13T03:00:00+0000`. Some examples include milliseconds (`2026-03-04T23:58:20.000+0000`), so the parser accepts both.
 - `priority`: None `0`, Low `1`, Medium `3`, High `5`.
 - `status`: Abandoned (Won't Do) `-1`, Normal `0`, Completed `2`. Checklist items use `0`/`1`.
+- Checklist items (`items[]`: `id, title, status, sortOrder, completedTime, isAllDay, startDate, timeZone`) live inside the task. ticktick-opentodo-sync changes them by writing the whole task with the edited `items` list: new items without `id` get one from TickTick, and omitted items are removed (verified 2026-11-22). Child tasks carry `parentId`; parents list `childIds`. Creating a child with `parentId` works (**verified 2026-11-22**: the parent's `childIds` lists it). Ticking an item by writing the task with an edited `items` list works (verified 2026-11-22).
 - `content` holds the notes for TEXT tasks. `desc` is the "description of checklist" for CHECKLIST tasks.
 - **No `modifiedTime` on tasks**, and no modified-since filter. Every run is a full pull plus a hash diff.
 

@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from ticktick_opentodo_sync.config import ConfigError, load, read_env_file, unknown_settings
+
+REQUIRED = {"TICKTICK_TOKEN": "tt", "OPENTODO_URL": "https://ot.example/", "OPENTODO_TOKEN": "ot"}
+
+
+def test_defaults() -> None:
+    cfg = load(REQUIRED)
+    assert cfg.dry_run is True
+    assert cfg.max_destructive == 10
+    assert cfg.interval == 300
+    assert cfg.opentodo_url == "https://ot.example"
+    assert cfg.timezone is None
+
+
+def test_missing_required() -> None:
+    with pytest.raises(ConfigError, match="OPENTODO_TOKEN"):
+        load({"TICKTICK_TOKEN": "x", "OPENTODO_URL": "https://x"})
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("TICKTICK_OPENTODO_SYNC_DRY_RUN", "maybe"),
+        ("TICKTICK_OPENTODO_SYNC_TIMEZONE", "Mars/Base"),
+        ("TICKTICK_OPENTODO_SYNC_INTERVAL", "10"),
+        ("TICKTICK_OPENTODO_SYNC_MAX_DESTRUCTIVE", "x"),
+        ("OPENTODO_URL", "ot.example"),
+    ],
+)
+def test_invalid_values(key: str, value: str) -> None:
+    with pytest.raises(ConfigError):
+        load(REQUIRED | {key: value})
+
+
+def test_env_file_parsing_and_precedence(tmp_path: Path) -> None:
+    f = tmp_path / ".env"
+    f.write_text(
+        "# comment\n"
+        "export TICKTICK_TOKEN='from file'\n"
+        'OPENTODO_URL="https://file.example"\n'
+        "OPENTODO_TOKEN=abc # trailing comment\n"
+        "TICKTICK_OPENTODO_SYNC_DRY_RUN=false\n"
+        "\n"
+    )
+    assert read_env_file(f)["OPENTODO_TOKEN"] == "abc"
+    cfg = load({"TICKTICK_TOKEN": "from env"}, env_file=f)
+    assert cfg.ticktick_token == "from env"
+    assert cfg.opentodo_url == "https://file.example"
+    assert cfg.dry_run is False
+
+
+def test_env_file_bad_line(tmp_path: Path) -> None:
+    f = tmp_path / ".env"
+    f.write_text("NOT A PAIR\n")
+    with pytest.raises(ConfigError, match=":1:"):
+        read_env_file(f)
+
+
+def test_unknown_settings_warnings() -> None:
+    cfg = load(
+        REQUIRED
+        | {
+            "TICKSYNC_DRY_RUN": "false",
+            "TICKSYNC_BOGUS": "1",
+            "TICKTICK_OPENTODO_SYNC_DRYRUN": "false",
+            "TICKTICK_OPENTODO_SYNC_WHATEVER": "x",
+            "TICKTICK_OPENTODO_SYNC_INTERVAL": "300",
+            "UNRELATED": "x",
+        }
+    )
+    assert cfg.dry_run is True  # misspelled/old keys really are ignored
+    assert cfg.warnings == (
+        "ignoring TICKSYNC_BOGUS: the old prefix is not read",
+        "ignoring TICKSYNC_DRY_RUN: rename it to TICKTICK_OPENTODO_SYNC_DRY_RUN",
+        "ignoring TICKTICK_OPENTODO_SYNC_DRYRUN: did you mean TICKTICK_OPENTODO_SYNC_DRY_RUN?",
+        "ignoring TICKTICK_OPENTODO_SYNC_WHATEVER: unknown setting",
+    )
+    assert unknown_settings(["TICKTICK_OPENTODO_SYNC_TIMEZONE", "OPENTODO_URL"]) == []

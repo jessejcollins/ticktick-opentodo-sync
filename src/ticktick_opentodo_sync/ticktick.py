@@ -1,0 +1,85 @@
+"""TickTick Open API client (personal API token). Endpoints: docs/api-notes.md."""
+
+from __future__ import annotations
+
+from typing import Any, cast
+
+from .e2ee import is_ciphertext
+from .http import Http
+from .models import JSON
+
+BASE_URL = "https://api.ticktick.com"
+
+
+class CiphertextWriteError(ValueError):
+    """A write would put OpenTodo ciphertext into TickTick (the 2026-11-21 incident)."""
+
+
+def refuse_ciphertext(body: object, path: str = "body") -> None:
+    """Raise if any string anywhere in ``body`` is an OpenTodo ``enc:vN:`` value."""
+    if is_ciphertext(body):
+        raise CiphertextWriteError(f"refusing to write OpenTodo ciphertext to TickTick ({path})")
+    if isinstance(body, dict):
+        for k, v in body.items():
+            refuse_ciphertext(v, f"{path}.{k}")
+    elif isinstance(body, list):
+        for i, v in enumerate(body):
+            refuse_ciphertext(v, f"{path}[{i}]")
+
+
+class TickTick:
+    def __init__(self, http: Http) -> None:
+        self.http = http
+
+    def preference_timezone(self) -> str | None:
+        prefs = self.http.request("POST", "/open/v1/preference")
+        tz = prefs.get("timeZone") if isinstance(prefs, dict) else None
+        return tz if isinstance(tz, str) and tz else None
+
+    def projects(self) -> list[JSON]:
+        return _list(self.http.request("GET", "/open/v1/project"))
+
+    def project_data(self, project_id: str) -> JSON:
+        data = self.http.request("GET", f"/open/v1/project/{project_id}/data")
+        return cast(JSON, data) if isinstance(data, dict) else {}
+
+    def get_task(self, project_id: str, task_id: str) -> JSON | None:
+        data = self.http.request(
+            "GET", f"/open/v1/project/{project_id}/task/{task_id}", not_found_ok=True
+        )
+        return cast(JSON, data) if isinstance(data, dict) and data else None
+
+    def create_task(self, body: JSON) -> JSON:
+        refuse_ciphertext(body)
+        return _obj(self.http.request("POST", "/open/v1/task", json=body))
+
+    def update_task(self, task_id: str, body: JSON) -> JSON:
+        refuse_ciphertext(body)
+        return _obj(
+            self.http.request("POST", f"/open/v1/task/{task_id}", json=body | {"id": task_id})
+        )
+
+    def complete_task(self, project_id: str, task_id: str) -> None:
+        self.http.request("POST", f"/open/v1/project/{project_id}/task/{task_id}/complete")
+
+    def delete_task(self, project_id: str, task_id: str) -> None:
+        self.http.request(
+            "DELETE", f"/open/v1/project/{project_id}/task/{task_id}", not_found_ok=True
+        )
+
+    def move_task(self, task_id: str, from_project: str, to_project: str) -> None:
+        body = [{"fromProjectId": from_project, "toProjectId": to_project, "taskId": task_id}]
+        self.http.request("POST", "/open/v1/task/move", json=body)
+
+    def create_project(self, name: str) -> JSON:
+        body = {"name": name, "viewMode": "list", "kind": "TASK"}
+        refuse_ciphertext(body)
+        return _obj(self.http.request("POST", "/open/v1/project", json=body))
+
+
+def _list(data: Any) -> list[JSON]:
+    return [x for x in data if isinstance(x, dict)] if isinstance(data, list) else []
+
+
+def _obj(data: Any) -> JSON:
+    return cast(JSON, data) if isinstance(data, dict) else {}

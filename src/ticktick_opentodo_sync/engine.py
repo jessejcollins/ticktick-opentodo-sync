@@ -1,0 +1,256 @@
+"""Pure sync rules: previous state + both snapshots in, actions out. No I/O."""
+
+from __future__ import annotations
+
+from collections import Counter
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field, replace
+from enum import Enum
+
+from .models import Task
+
+
+class Kind(Enum):
+    CREATE_OT = "create_ot"
+    CREATE_TT = "create_tt"
+    UPDATE_OT = "update_ot"
+    UPDATE_TT = "update_tt"
+    DELETE_OT = "delete_ot"
+    DELETE_TT = "delete_tt"
+    FORGET = "forget"
+    """Both sides gone: drop the pair."""
+    REHASH = "rehash"
+    """Both sides changed to the same content: record the new hashes, write nothing."""
+
+
+@dataclass(frozen=True, slots=True)
+class Pair:
+    tt_id: str
+    ot_id: str
+    tt_hash: str
+    ot_hash: str
+    tt_project: str
+    """Real TickTick project id the task was last seen in (needed for GET/DELETE)."""
+    base: Task | None = None
+    """Content at the last sync; ``None`` for pairs made by --match-existing."""
+
+
+@dataclass
+class Snapshot:
+    """One side's current view.
+
+    A paired id that is in none of these sets is treated as deleted.
+    """
+
+    tasks: dict[str, Task] = field(default_factory=dict)
+    deleted: set[str] = field(default_factory=set)
+    unchanged: set[str] = field(default_factory=set)
+    """Present but not fetched (TickTick tasks already known to be completed)."""
+    out_of_scope: set[str] = field(default_factory=set)
+
+
+@dataclass(frozen=True, slots=True)
+class Action:
+    kind: Kind
+    tt_id: str | None = None
+    ot_id: str | None = None
+    task: Task | None = None
+    """Desired content (create/update) or the new base (rehash)."""
+    tt_hash: str | None = None
+    """For writes to OpenTodo: TickTick-side hash to record. ``None`` = leave as is."""
+    ot_hash: str | None = None
+    """For writes to TickTick: OpenTodo-side hash to record. ``None`` = leave as is."""
+    conflict: bool = False
+    completes: bool = False
+    """The write marks an open task completed (counts towards the bulk guard)."""
+    note: str = ""
+
+    @property
+    def destructive(self) -> bool:
+        return self.kind in (Kind.DELETE_OT, Kind.DELETE_TT) or self.completes
+
+
+def plan(pairs: Iterable[Pair], tt: Snapshot, ot: Snapshot) -> list[Action]:
+    actions: list[Action] = []
+    pairs = list(pairs)
+    paired_tt = {p.tt_id for p in pairs}
+    paired_ot = {p.ot_id for p in pairs}
+
+    for p in sorted(pairs, key=lambda p: p.tt_id):
+        actions.extend(_plan_pair(p, tt, ot))
+
+    for tt_id, task in sorted(tt.tasks.items()):
+        if tt_id not in paired_tt and not task.completed:
+            actions.append(
+                Action(
+                    Kind.CREATE_OT,
+                    tt_id=tt_id,
+                    task=task,
+                    tt_hash=task.content_hash(),
+                    note="new in TickTick",
+                )
+            )
+    for ot_id, task in sorted(ot.tasks.items()):
+        if ot_id not in paired_ot and not task.completed:
+            actions.append(
+                Action(
+                    Kind.CREATE_TT,
+                    ot_id=ot_id,
+                    task=task,
+                    ot_hash=task.content_hash(),
+                    note="new in OpenTodo",
+                )
+            )
+    return actions
+
+
+def _plan_pair(p: Pair, tt: Snapshot, ot: Snapshot) -> list[Action]:
+    if p.tt_id in tt.out_of_scope or p.ot_id in ot.out_of_scope:
+        return []
+
+    tt_task: Task | None
+    if p.tt_id in tt.unchanged and p.base is not None:
+        tt_task, tt_changed = p.base, False
+    else:
+        tt_task = tt.tasks.get(p.tt_id)
+        tt_changed = tt_task is not None and tt_task.content_hash() != p.tt_hash
+    ot_task = ot.tasks.get(p.ot_id)
+    ot_changed = ot_task is not None and ot_task.content_hash() != p.ot_hash
+
+    if tt_task is None and ot_task is None:
+        return [Action(Kind.FORGET, tt_id=p.tt_id, ot_id=p.ot_id, note="deleted on both sides")]
+    if tt_task is None:
+        return [
+            Action(
+                Kind.DELETE_OT,
+                tt_id=p.tt_id,
+                ot_id=p.ot_id,
+                task=ot_task,
+                note="deleted in TickTick",
+            )
+        ]
+    if ot_task is None:
+        if tt_changed:
+            return [
+                Action(
+                    Kind.CREATE_OT,
+                    tt_id=p.tt_id,
+                    task=tt_task,
+                    tt_hash=tt_task.content_hash(),
+                    conflict=True,
+                    note="deleted in OpenTodo but changed in TickTick: recreating",
+                )
+            ]
+        return [
+            Action(
+                Kind.DELETE_TT,
+                tt_id=p.tt_id,
+                ot_id=p.ot_id,
+                task=tt_task,
+                note="deleted in OpenTodo",
+            )
+        ]
+
+    if not tt_changed and not ot_changed:
+        return []
+
+    conflict = False
+    if tt_changed and ot_changed:
+        # TickTick wins, except that a completion on either side sticks.
+        merged = replace(tt_task, completed=tt_task.completed or ot_task.completed)
+        conflict = tt_task != ot_task
+    elif tt_changed:
+        merged = tt_task
+    else:
+        merged = ot_task
+
+    write_ot, write_tt = ot_task != merged, tt_task != merged
+    out: list[Action] = []
+    note = "conflict: TickTick wins" if conflict else ""
+    if write_ot:
+        out.append(
+            Action(
+                Kind.UPDATE_OT,
+                tt_id=p.tt_id,
+                ot_id=p.ot_id,
+                task=merged,
+                conflict=conflict,
+                tt_hash=None if write_tt else tt_task.content_hash(),
+                completes=merged.completed and not ot_task.completed,
+                note=note or "changed in TickTick",
+            )
+        )
+    if write_tt:
+        out.append(
+            Action(
+                Kind.UPDATE_TT,
+                tt_id=p.tt_id,
+                ot_id=p.ot_id,
+                task=merged,
+                conflict=conflict and not write_ot,
+                ot_hash=None if write_ot else ot_task.content_hash(),
+                completes=merged.completed and not tt_task.completed,
+                note=note or "changed in OpenTodo",
+            )
+        )
+    if not out:
+        out.append(
+            Action(
+                Kind.REHASH,
+                tt_id=p.tt_id,
+                ot_id=p.ot_id,
+                task=merged,
+                tt_hash=tt_task.content_hash(),
+                ot_hash=ot_task.content_hash(),
+                note="same change on both sides",
+            )
+        )
+    return out
+
+
+def destructive_count(actions: Sequence[Action]) -> int:
+    return sum(a.destructive for a in actions)
+
+
+# --- one-time pairing of pre-existing tasks ---------------------------------------------------
+
+
+@dataclass
+class MatchResult:
+    matches: list[tuple[str, str]] = field(default_factory=list)
+    """(tt_id, ot_id)."""
+    tt_unmatched: list[str] = field(default_factory=list)
+    ot_unmatched: list[str] = field(default_factory=list)
+    ambiguous: list[tuple[str, str]] = field(default_factory=list)
+    """(project key, title) that occurs more than once on a side."""
+
+
+def match_existing(pairs: Iterable[Pair], tt: Snapshot, ot: Snapshot) -> MatchResult:
+    """Pair unpaired open tasks by (project, exact title); only unique keys are paired."""
+    pairs = list(pairs)
+    paired_tt = {p.tt_id for p in pairs}
+    paired_ot = {p.ot_id for p in pairs}
+
+    def index(snap: Snapshot, paired: set[str]) -> dict[tuple[str, str], list[str]]:
+        idx: dict[tuple[str, str], list[str]] = {}
+        for task_id, t in sorted(snap.tasks.items()):
+            if task_id not in paired and not t.completed:
+                idx.setdefault((t.project, t.title), []).append(task_id)
+        return idx
+
+    tt_idx, ot_idx = index(tt, paired_tt), index(ot, paired_ot)
+    res = MatchResult()
+    for key in sorted(tt_idx.keys() | ot_idx.keys()):
+        tts, ots = tt_idx.get(key, []), ot_idx.get(key, [])
+        if len(tts) == 1 and len(ots) == 1:
+            res.matches.append((tts[0], ots[0]))
+            continue
+        if len(tts) > 1 or len(ots) > 1:
+            res.ambiguous.append(key)
+        res.tt_unmatched.extend(tts)
+        res.ot_unmatched.extend(ots)
+    return res
+
+
+def summarize(actions: Sequence[Action]) -> Counter[Kind]:
+    return Counter(a.kind for a in actions)

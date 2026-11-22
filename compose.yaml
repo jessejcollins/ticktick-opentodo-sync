@@ -1,0 +1,40 @@
+# TickTick <-> OpenTodo sync. Shares the Pi with Pi-hole, so it is boxed in tightly.
+#   docker compose up -d --build
+#   docker compose logs -f ticktick-opentodo-sync
+#   docker compose exec ticktick-opentodo-sync ticktick-opentodo-sync --status
+#   docker compose run --rm ticktick-opentodo-sync --dry-run   # one-off pass (shares the state lock)
+services:
+  ticktick-opentodo-sync:
+    build: .
+    image: ticktick-opentodo-sync:local
+    container_name: ticktick-opentodo-sync
+    restart: unless-stopped
+    env_file: .env
+    command: ["--loop"] # interval: TICKTICK_OPENTODO_SYNC_INTERVAL (default 300s)
+    volumes:
+      - ticktick-opentodo-sync-data:/data
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+      - /run/ticktick-opentodo-sync:size=1m,uid=10001,gid=10001,mode=0700
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.25
+    cpu_shares: 256 # lower weight than default 1024, like Nice=10
+    pids_limit: 64
+    stop_grace_period: 60s
+    # Docker can't use a 127.0.0.1 resolver from the host. If Pi-hole is the host's DNS and
+    # you want ticktick-opentodo-sync to resolve through it, point at the Pi's LAN address:
+    # dns: ["192.168.1.10"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "3"
+
+volumes:
+  ticktick-opentodo-sync-data:
+    name: ticktick-opentodo-sync-data

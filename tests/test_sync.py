@@ -507,7 +507,8 @@ def test_repeating_checklist_completed_in_opentodo(env: Env) -> None:
     # TickTick moves on and resets its checklist for the next occurrence.
     for item in env.tt.tasks[tid]["items"]:
         item["status"] = 0
-    env.run()
+    res = env.run()
+    assert res.conflicts == 0 and res.ot_items.updated == 3, res.summary()
     assert all(s["completed_at"] is None for s in subtasks(env, "Pack").values())
     assert all(i["status"] == 0 for i in env.tt.tasks[tid]["items"])
     env.assert_quiet()

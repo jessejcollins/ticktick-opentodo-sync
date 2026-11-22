@@ -6,7 +6,7 @@ import logging
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date
 from typing import Any, Protocol
 
@@ -660,7 +660,16 @@ class Syncer:
         # A repeating parent completed in OpenTodo this pass: its items are resynced from
         # TickTick once TickTick has moved on (see _update_tt), not now.
         skip = {a.tt_id for a in task_actions if a.occurrence}
-        return [a for a in actions if self._item_parent(a, w) not in skip]
+        out = []
+        for a in actions:
+            if self._item_parent(a, w) in skip:
+                continue
+            pair = w.item_pairs.get(a.tt_id or "")
+            if pair is not None and pair.tt_hash == pair.ot_hash == "" and a.conflict:
+                # Forced by resync_items_from_ticktick, not edits on both sides.
+                a = replace(a, conflict=False, note="resync from TickTick after a repeat")
+            out.append(a)
+        return out
 
     @staticmethod
     def _item_parent(a: Action, w: World) -> str:

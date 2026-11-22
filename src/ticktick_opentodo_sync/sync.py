@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
+from datetime import date
 from typing import Any, Protocol
 
-from . import engine
+from . import engine, recurrence
 from .engine import Action, Kind, Pair, Snapshot
 from .http import ApiError
 from .mapping import TT_DONE, Mapper, ProjectInfo, reconcile_projects
@@ -103,6 +105,7 @@ class World:
     ot: Snapshot
     pairs: dict[str, Pair]
     tt_raw: dict[str, JSON] = field(default_factory=dict)
+    ot_raw: dict[str, JSON] = field(default_factory=dict)
     label_ids: dict[str, str] = field(default_factory=dict)
     """Lowercased label name -> OpenTodo label id."""
     project_names: dict[str, str] = field(default_factory=dict)
@@ -277,6 +280,12 @@ class Syncer:
             if raw.get("deleted_at") is not None:
                 w.ot.deleted.add(oid)
                 continue
+            if raw.get("series_id") and raw.get("completed_at") and not raw.get("skipped"):
+                occ = raw.get("occurrence_date")
+                if occ:
+                    w.ot.completed_occurrences.setdefault(str(raw["series_id"]), set()).add(
+                        str(occ)
+                    )
             if raw.get("parent_id") or raw.get("series_id") or raw.get("habit"):
                 w.ot.out_of_scope.add(oid)
                 continue
@@ -285,6 +294,7 @@ class Syncer:
                 log.warning("OpenTodo task %s: content or a label unreadable; skipping it", oid)
                 w.ot.out_of_scope.add(oid)
                 continue
+            w.ot_raw[oid] = raw
             task = self._normalize(w.mapper.from_ot, raw, "OpenTodo", oid)
             if task is None or task.project not in in_scope:
                 w.ot.out_of_scope.add(oid)
@@ -518,6 +528,34 @@ class Syncer:
         assert a.tt_id
         self.state.update_pair(a.tt_id, tt_hash=a.tt_hash, ot_hash=a.ot_hash, base=a.task)
 
+    # --- reports ----------------------------------------------------------------------
+
+    def recurrence_report(self) -> RecurrenceReport:
+        """How each paired repeating TickTick task's rule would translate. Writes nothing."""
+        w = self.collect(dry_run=True)
+        rep = RecurrenceReport()
+        for p in sorted(w.pairs.values(), key=lambda p: p.tt_id):
+            raw, task = w.tt_raw.get(p.tt_id), w.tt.tasks.get(p.tt_id)
+            if raw is None or task is None or not raw.get("repeatFlag"):
+                continue
+            due = date.fromisoformat(task.due.date) if task.due else None
+            t = recurrence.from_ticktick(str(raw["repeatFlag"]), raw.get("repeatFrom"), due)
+            where = w.project_names.get(task.project, task.project)
+            label = f"{task.title!r} in {where!r} (due {due or '-'})"
+            source = f"{raw['repeatFlag']} from={raw.get('repeatFrom')}"
+            current = (w.ot_raw.get(p.ot_id) or {}).get("recurrence")
+            if t.rule is None:
+                rep.untranslatable.append((label, source, t.problem))
+                continue
+            rep.translated[(source, t.rule)] += 1
+            if t.problem:
+                rep.warnings.append((label, t.rule, t.problem))
+            if current and current != t.rule:
+                rep.differs.append((label, str(current), t.rule))
+            elif current:
+                rep.already += 1
+        return rep
+
     # --- one-time pairing -------------------------------------------------------------
 
     def match_existing(self, *, dry_run: bool) -> engine.MatchResult:
@@ -563,6 +601,44 @@ class Syncer:
             )
         self.state.set_meta("matched_existing", "1")
         return m
+
+
+@dataclass
+class RecurrenceReport:
+    translated: Counter[tuple[str, str]] = field(default_factory=Counter)
+    """(TickTick rule, OpenTodo rule) -> number of tasks."""
+    untranslatable: list[tuple[str, str, str]] = field(default_factory=list)
+    """(task, TickTick rule, reason)."""
+    warnings: list[tuple[str, str, str]] = field(default_factory=list)
+    """(task, OpenTodo rule, warning): translated, but worth a look."""
+    differs: list[tuple[str, str, str]] = field(default_factory=list)
+    """(task, OpenTodo's current rule, translation): OpenTodo already repeats differently."""
+    already: int = 0
+    """OpenTodo twin already has exactly the translated rule."""
+
+    def lines(self) -> list[str]:
+        n = sum(self.translated.values())
+        out = [
+            f"recurrence report: {n + len(self.untranslatable)} repeating paired task(s): "
+            f"{n} translate, {len(self.untranslatable)} don't, {len(self.warnings)} warning(s), "
+            f"{self.already} already set in OpenTodo, {len(self.differs)} set differently. "
+            "Nothing was written.",
+            "translations (tasks  TickTick rule  ->  OpenTodo rule):",
+        ]
+        for (src, rule), count in sorted(self.translated.items(), key=lambda kv: (-kv[1], kv[0])):
+            out.append(f"  {count:4}  {src}  ->  {rule}")
+        if self.untranslatable:
+            out.append("untranslatable (would keep today's behaviour: due date only):")
+            out += [f"  {label}: {src}: {why}" for label, src, why in self.untranslatable]
+        if self.warnings:
+            out.append("warnings:")
+            out += [f"  {label}: {rule!r}: {why}" for label, rule, why in self.warnings]
+        if self.differs:
+            out.append("OpenTodo already repeats differently:")
+            out += [
+                f"  {label}: has {cur!r}, TickTick says {new!r}" for label, cur, new in self.differs
+            ]
+        return out
 
 
 def _count(a: Action, res: PassResult) -> None:

@@ -176,7 +176,9 @@ def test_reopen_in_opentodo_reopens_in_ticktick(env: Env) -> None:
 def test_recurring_completion_in_opentodo_advances(env: Env) -> None:
     _, b = seed(env)
     env.tt.tasks[b]["repeatFlag"] = "RRULE:FREQ=DAILY"
-    env.run()  # repeatFlag is not synced: nothing to do
+    env.run()  # the rule goes to OpenTodo
+    assert env.ot_by_title("Report")["recurrence"] == "every day"
+    # A completion without OpenTodo's own repeat logic (as a plain REST client would do it).
     env.ot_by_title("Report")["completed_at"] = 1
     env.run()  # completes in TickTick, which advances the task by a day
     env.run()  # the advanced instance flows back and reopens the OpenTodo task
@@ -289,3 +291,88 @@ def test_inbox_endpoint_404_degrades(env: Env) -> None:
     env.tt.project_data = project_data  # type: ignore[method-assign,assignment]
     res = env.run()
     assert res.ok and res.ot.created == 1
+
+
+# --- recurrence (phase 2) --------------------------------------------------------------------
+
+
+def _weekly(env: Env) -> str:
+    """A TickTick task due Monday 2026-11-23 that repeats every Monday."""
+    tid = env.tt.add_task(
+        "Review",
+        dueDate="2026-11-23T05:00:00+0000",
+        isAllDay=True,
+        timeZone=NY,
+        repeatFlag="RRULE:FREQ=WEEKLY;WKST=SU;INTERVAL=1;BYDAY=MO",
+        repeatFrom="0",
+    )
+    assert env.run().ok
+    return tid
+
+
+def test_rule_goes_to_opentodo_and_back(env: Env) -> None:
+    tid = _weekly(env)
+    ot = env.ot_by_title("Review")
+    assert (ot["recurrence"], ot["due"]) == ("every monday", {"date": "2026-11-23"})
+    env.assert_quiet()
+
+    ot["recurrence"] = "every 2 weeks after completion"
+    assert env.run().tt.updated == 1
+    assert env.tt.tasks[tid]["repeatFlag"] == "RRULE:FREQ=WEEKLY;INTERVAL=2"
+    assert env.tt.tasks[tid]["repeatFrom"] == "1"
+    env.assert_quiet()
+
+    ot["recurrence"] = None
+    env.run()
+    assert env.tt.tasks[tid]["repeatFlag"] == ""
+    env.assert_quiet()
+
+
+def test_untranslatable_rule_stays_in_ticktick(env: Env) -> None:
+    tid = env.tt.add_task(
+        "Gas",
+        dueDate="2026-12-06T05:00:00+0000",
+        isAllDay=True,
+        timeZone=NY,
+        repeatFlag="RRULE:FREQ=MONTHLY;BYMONTHDAY=6,10",
+    )
+    env.run()
+    assert env.ot_by_title("Gas")["recurrence"] is None
+    env.ot_by_title("Gas")["title"] = "Gas!"
+    env.run()
+    assert env.tt.tasks[tid]["title"] == "Gas!"
+    assert env.tt.tasks[tid]["repeatFlag"] == "RRULE:FREQ=MONTHLY;BYMONTHDAY=6,10"
+    env.assert_quiet()
+
+
+def test_completing_repeating_task_in_opentodo_completes_once_in_ticktick(env: Env) -> None:
+    tid = _weekly(env)
+    ot = env.ot_by_title("Review")
+    # OpenTodo's completion: the task moves on, the finished date becomes an occurrence record.
+    ot["due"] = {"date": "2026-11-30"}
+    env.ot.add_task(
+        "Review", None, series_id=ot["id"], occurrence_date="2026-11-23", completed_at=1
+    )
+    res = env.run()
+    assert res.tt.completed == 1 and res.ot.updated == 0, res.summary()
+    assert ("complete", tid) in env.tt.writes
+    # The fake TickTick advances by a day; TickTick's date wins on the next pass.
+    env.run()
+    assert ot["due"] == {"date": "2026-11-24"} and ot["completed_at"] is None
+    assert sum(w == ("complete", tid) for w in env.tt.writes) == 1
+    env.assert_quiet()
+
+
+def test_skipping_in_opentodo_moves_the_ticktick_date(env: Env) -> None:
+    tid = _weekly(env)
+    env.ot_by_title("Review")["due"] = {"date": "2026-11-30"}  # skip: no occurrence record
+    res = env.run()
+    assert res.tt.updated == 1 and res.tt.completed == 0, res.summary()
+    assert env.tt.tasks[tid]["dueDate"].startswith("2026-11-30")
+    env.assert_quiet()
+
+
+def test_tasks_without_rules_keep_their_pre_phase_2_hash() -> None:
+    from ticktick_opentodo_sync.models import Task
+
+    assert "recurrence" not in Task("x").to_json()

@@ -44,11 +44,10 @@ TickTick is primary. For each task pair, keep a record of what each side looked 
 
 ### Fields (v1)
 
-Sync: title, notes/description, due date (+ time and time zone), priority (map TickTick's 0/1/3/5 onto OpenTodo's scale and document the mapping), tags, completed status, list/project.
+Sync: title, notes/description, due date (+ time and time zone), priority (map TickTick's 0/1/3/5 onto OpenTodo's scale and document the mapping), tags, completed status, list/project, and (phase 2, 2026-11-22) recurrence rules.
 
 Leave out of v1 (sync these later if wanted):
 - **Subtasks/checklist items.** Phase 2.
-- **Recurrence rules.** TickTick owns recurring tasks. In v1, sync only the current instance's due date and don't copy recurrence rules. Look at how each API represents recurrence before deciding on phase 2.
 - Attachments, comments, reminders, focus/pomodoro data, habits.
 
 ## API facts
@@ -110,6 +109,12 @@ Answers to questions asked during the build (2026-11-21). Treat as settled.
 - **Conflicts:** TickTick wins every field except completion. A completion made on either side is never undone by a conflict ("Completed in either app" takes priority).
 - **Subtasks:** TickTick child tasks (`parentId`) and OpenTodo child tasks (`parent_id`) are out of scope in v1 and ignored on both sides.
 - **Closed TickTick lists / archived OpenTodo projects** are out of scope. Their tasks are left alone.
+- **Recurrence (phase 2, 2026-11-22).** Rules sync both ways (`recurrence.py`, a port of OpenTodo's own RRULE converter). Report first with `--recurrence-report` (read-only).
+  - A TickTick rule OpenTodo can't express exactly is kept in TickTick only (`ticktick-only:` in state) and never cleared from the OpenTodo side; that task syncs its due date only. If TickTick already holds the same rule in a different spelling, its spelling is kept.
+  - TickTick `repeatFrom` `0` and `2` both mean "from the due date" (confirmed by Jesse for the daily tasks); `1` is OpenTodo's `after completion`.
+  - Completing a repeating task in OpenTodo (task moves on, plus a completed occurrence record with `series_id`) completes it once in TickTick and doesn't write OpenTodo that pass. TickTick then advances it, and its next date wins on the following pass. Skipping in OpenTodo just moves the TickTick date.
+  - Completing in TickTick only moves the OpenTodo date: OpenTodo gets no occurrence record for it (its completion history lacks those).
+  - Jesse's 5 untranslatable rules were reworked in TickTick on 2026-11-22: water filter and gas split into two tasks each, alarm moved to Dec 1, AMEX YEAR no longer repeats, AMEX QUARTER due on the quarter's 1st and left overdue until done (don't push it back).
 
 ## Logging and ops
 

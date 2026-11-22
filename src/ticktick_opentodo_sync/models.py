@@ -11,6 +11,9 @@ from typing import Any
 INBOX = "inbox"
 """Project key of the Inbox on both sides."""
 
+TICKTICK_ONLY_PREFIX = "ticktick-only:"
+"""``Task.recurrence`` prefix for a TickTick rule OpenTodo can't express (kept, never copied)."""
+
 PENDING_PREFIX = "ot:"
 """Project key prefix for an OpenTodo project not yet created in TickTick (dry run only)."""
 
@@ -59,9 +62,11 @@ class Task:
     priority: Priority = Priority.NONE
     tags: frozenset[str] = field(default_factory=frozenset)
     completed: bool = False
+    recurrence: str | None = None
+    """OpenTodo rule (canonical, e.g. ``every monday``), ``ticktick-only:<RRULE>``, or None."""
 
     def to_json(self) -> JSON:
-        return {
+        out: JSON = {
             "title": self.title,
             "project": self.project,
             "notes": self.notes,
@@ -70,6 +75,14 @@ class Task:
             "tags": sorted(self.tags),
             "completed": self.completed,
         }
+        if self.recurrence is not None:
+            # Only when set: tasks without a rule keep the hashes stored before phase 2.
+            out["recurrence"] = self.recurrence
+        return out
+
+    @property
+    def ticktick_only_rule(self) -> bool:
+        return (self.recurrence or "").startswith(TICKTICK_ONLY_PREFIX)
 
     @classmethod
     def from_json(cls, data: JSON) -> Task:
@@ -82,6 +95,7 @@ class Task:
             priority=Priority(data.get("priority", 0)),
             tags=frozenset(data.get("tags", ())),
             completed=bool(data.get("completed", False)),
+            recurrence=data.get("recurrence"),
         )
 
     def content_hash(self) -> str:
@@ -96,4 +110,4 @@ class Task:
 def changed_fields(old: Task, new: Task) -> list[str]:
     """Names of the :class:`Task` fields that differ (for logs)."""
     a, b = old.to_json(), new.to_json()
-    return [k for k in a if a[k] != b[k]]
+    return [k for k in a | b if a.get(k) != b.get(k)]

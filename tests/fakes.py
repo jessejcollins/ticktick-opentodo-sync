@@ -129,6 +129,7 @@ class FakeOpenTodo:
             "completed_at": None,
             "deleted_at": None,
             "parent_id": None,
+            "recurrence": None,
         } | fields
         return oid
 

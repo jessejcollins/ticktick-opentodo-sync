@@ -71,7 +71,7 @@ Not documented. ticktick-opentodo-sync spaces requests (`TICKTICK_OPENTODO_SYNC_
 
 ### Recurrence
 
-`repeatFlag` is an RRULE string plus `repeatFrom`, returned as a string (`"0"` from due date, `"1"` from completion date, `"2"` calendar; `"2"` behaves like `"0"` in practice). **Verified 2026-11-22:** an update with `repeatFlag: ""` removes the rule. Completing a recurring task keeps the same task ID and advances its dates. The completed instance gets a new ID (**UNVERIFIED**, observed behaviour of the apps). v1 syncs only the current `dueDate`; `repeatFlag` and `reminders` are preserved on update because the full task is merged.
+Completing a repeating task through the API (`.../complete`) moves it to its next date under the same id and **unticks its checklist items** (verified 2026-11-22). `repeatFlag` is an RRULE string plus `repeatFrom`, returned as a string (`"0"` from due date, `"1"` from completion date, `"2"` calendar; `"2"` behaves like `"0"` in practice). **Verified 2026-11-22:** an update with `repeatFlag: ""` removes the rule. Completing a recurring task keeps the same task ID and advances its dates. The completed instance gets a new ID (**UNVERIFIED**, observed behaviour of the apps). v1 syncs only the current `dueDate`; `repeatFlag` and `reminders` are preserved on update because the full task is merged.
 
 ## OpenTodo REST API
 

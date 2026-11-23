@@ -297,7 +297,7 @@ def test_inbox_endpoint_404_degrades(env: Env) -> None:
 # --- recurrence (phase 2) --------------------------------------------------------------------
 
 
-def _weekly(env: Env) -> str:
+def _weekly(env: Env, **fields: Any) -> str:
     """A TickTick task due Monday 2026-11-23 that repeats every Monday."""
     tid = env.tt.add_task(
         "Review",
@@ -307,6 +307,7 @@ def _weekly(env: Env) -> str:
         repeatFlag="RRULE:FREQ=WEEKLY;WKST=SU;INTERVAL=1;BYDAY=MO",
         repeatFrom="0",
     )
+    env.tt.tasks[tid] |= fields
     assert env.run().ok
     return tid
 
@@ -563,4 +564,56 @@ def test_reminder_conflict_ticktick_wins(env: Env) -> None:
     assert res.conflicts == 1 and res.ot.updated == 1, res.summary()
     assert env.ot_by_title("Call")["reminders"] == [-60]
     assert env.tt.tasks[tid]["reminders"] == ["TRIGGER:-PT1H"]
+    env.assert_quiet()
+
+
+# --- repeating tasks completed in TickTick ----------------------------------------------------
+
+
+def test_completing_repeating_task_in_ticktick_completes_the_opentodo_occurrence(
+    env: Env,
+) -> None:
+    tid = _weekly(env)
+    env.tt.complete_task("", tid)  # like the app: a completed copy, the task moves on a day
+    env.tt.writes.clear()
+    res = env.run()
+    assert res.ot.updated == 1 and res.ok, res.summary()
+    ot = env.ot_by_title("Review")
+    occ = [w for w in env.ot.writes if w[0] == "complete_occurrence"]
+    assert occ == [("complete_occurrence", (ot["id"], "2026-11-23", 1795402800000))]
+    records = [t for t in env.ot.tasks_.values() if t.get("series_id") == ot["id"]]
+    assert [(r["occurrence_date"], r["completed_at"]) for r in records] == [
+        ("2026-11-23", 1795402800000)
+    ]
+    assert ot["due"]["date"] == "2026-11-24" and ot["completed_at"] is None
+    assert not env.tt.writes  # nothing goes back to TickTick
+    env.assert_quiet()
+
+
+def test_moving_repeating_task_in_ticktick_only_moves_opentodo(env: Env) -> None:
+    tid = _weekly(env)
+    env.tt.tasks[tid]["dueDate"] = env.tt.tasks[tid]["startDate"] = "2026-11-30T05:00:00+0000"
+    res = env.run()
+    assert res.ot.updated == 1, res.summary()
+    assert not [w for w in env.ot.writes if w[0] == "complete_occurrence"]
+    assert env.ot_by_title("Review")["due"]["date"] == "2026-11-30"
+    env.assert_quiet()
+
+
+def test_after_completion_rule_completed_in_ticktick_only_moves(env: Env) -> None:
+    tid = _weekly(env, repeatFrom="1")
+    env.tt.complete_task("", tid)
+    env.run()
+    assert not [w for w in env.ot.writes if w[0] == "complete_occurrence"]
+    assert env.ot_by_title("Review")["due"]["date"] == "2026-11-24"
+    env.assert_quiet()
+
+
+def test_opentodo_refusing_the_occurrence_falls_back_to_a_move(env: Env) -> None:
+    tid = _weekly(env)
+    env.ot.refuse_occurrences = True
+    env.tt.complete_task("", tid)
+    res = env.run()
+    assert res.ok and res.ot.updated == 1, res.summary()
+    assert env.ot_by_title("Review")["due"]["date"] == "2026-11-24"
     env.assert_quiet()

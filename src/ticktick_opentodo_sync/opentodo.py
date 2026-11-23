@@ -8,6 +8,7 @@ A value that cannot be decrypted marks its object with :data:`UNREADABLE` instea
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -24,6 +25,12 @@ PLACEHOLDER = "ticktick-opentodo-sync: encrypting…"
 """Content of a just-created object until the PATCH with its ciphertext lands.
 
 Ciphertext is bound to the object's id, which the server assigns on create.
+"""
+
+REMINDERS = "reminders"
+"""Task key of this client's own (not an OpenTodo field): sorted ``offset_minutes`` of the
+task's live *relative* reminders. Reads carry it; creates and updates that carry it make the
+task's relative reminders match. Other kinds (absolute, deadline, location) are left alone.
 """
 
 TASK_CONTENT = ("title", "description")
@@ -52,6 +59,8 @@ class OpenTodo:
         self._key: e2ee.AccountKey | None = None
         self._key_version: int | None = None
         self.encrypted = False
+        self._reminders: dict[str, list[JSON]] = {}
+        """Task id -> its live relative reminders, as of :meth:`tasks` plus our writes."""
 
     # --- encryption ---------------------------------------------------------------------
 
@@ -168,22 +177,86 @@ class OpenTodo:
         return self._create_sealed("label", "labels", {"name": name}, NAME_CONTENT)
 
     def tasks(self) -> list[JSON]:
-        """Open, completed and soft-deleted (``deleted_at`` set) tasks."""
+        """Open, completed and soft-deleted (``deleted_at`` set) tasks, with :data:`REMINDERS`."""
         data = self.http.request("GET", "/api/v1/tasks", params={"include_deleted": "true"})
-        return [self._open("task", t, TASK_CONTENT) for t in _items(data, "tasks")]
+        self._load_reminders()
+        return [
+            self._with_reminders(self._open("task", t, TASK_CONTENT)) for t in _items(data, "tasks")
+        ]
 
     def create_task(self, body: JSON, *, idempotency_key: str) -> JSON:
+        body, wanted = _split_reminders(body)
         headers = {"Idempotency-Key": idempotency_key}
-        return self._create_sealed("task", "tasks", body, TASK_CONTENT, headers)
+        created = self._create_sealed("task", "tasks", body, TASK_CONTENT, headers)
+        if wanted:
+            try:
+                self._set_reminders(str(created["id"]), wanted)
+            except Exception as exc:
+                # The task exists now: failing here would create it again next pass.
+                log.error("OpenTodo task %s: reminders not added: %s", created["id"], exc)  # noqa: TRY400
+        return self._with_reminders(created)
 
     def update_task(self, task_id: str, body: JSON) -> JSON:
+        body, wanted = _split_reminders(body)
         sealed = self._seal("task", task_id, body, TASK_CONTENT)
+        # The task first: relative reminders fire from its (possibly new) due.
         resp = self.http.request("PATCH", f"/api/v1/tasks/{task_id}", json=sealed)
-        return self._open("task", _obj(resp), TASK_CONTENT)
+        if wanted is not None:
+            self._set_reminders(task_id, wanted)
+        return self._with_reminders(self._open("task", _obj(resp), TASK_CONTENT))
+
+    # --- reminders ----------------------------------------------------------------------
+
+    def _load_reminders(self) -> None:
+        data = self.http.request("GET", "/api/v1/reminders")
+        if not isinstance(data, dict) or not isinstance(data.get("reminders"), list):
+            # Never read "no reminders" from a response we don't understand.
+            raise TypeError(f"unexpected GET /api/v1/reminders response: {type(data).__name__}")
+        self._reminders = {}
+        for r in _items(data, "reminders"):
+            if (
+                r.get("deleted_at") is None
+                and r.get("kind") == "relative"
+                and r.get("task_id")
+                and isinstance(r.get("offset_minutes"), int)
+            ):
+                self._reminders.setdefault(str(r["task_id"]), []).append(r)
+
+    def _with_reminders(self, task: JSON) -> JSON:
+        mine = self._reminders.get(str(task.get("id")), [])
+        task[REMINDERS] = sorted(int(r["offset_minutes"]) for r in mine)
+        return task
+
+    def _set_reminders(self, task_id: str, wanted: list[int]) -> None:
+        """Make the task's relative reminders exactly ``wanted`` (one per offset)."""
+        current = self._reminders.setdefault(task_id, [])  # updated as each write lands
+        missing = list(wanted)
+        for r in list(current):
+            if r["offset_minutes"] in missing:
+                missing.remove(r["offset_minutes"])
+            else:
+                self.http.request("DELETE", f"/api/v1/reminders/{r['id']}", not_found_ok=True)
+                current.remove(r)
+        for minutes in missing:
+            created = self.http.request(
+                "POST",
+                "/api/v1/reminders",
+                json={"task_id": task_id, "kind": "relative", "offset_minutes": minutes},
+                headers={"Idempotency-Key": f"ticktick-opentodo-sync-{uuid.uuid4()}"},
+            )
+            current.append(_obj(created) | {"offset_minutes": minutes})
 
     def delete_task(self, task_id: str) -> None:
         """Soft delete (to the Trash)."""
         self.http.request("DELETE", f"/api/v1/tasks/{task_id}", not_found_ok=True)
+
+
+def _split_reminders(body: JSON) -> tuple[JSON, list[int] | None]:
+    if REMINDERS not in body:
+        return body, None
+    rest = dict(body)
+    wanted = rest.pop(REMINDERS)
+    return rest, sorted({int(m) for m in wanted or ()})
 
 
 def _items(data: Any, key: str) -> list[JSON]:

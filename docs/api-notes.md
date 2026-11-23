@@ -71,7 +71,11 @@ Not documented. ticktick-opentodo-sync spaces requests (`TICKTICK_OPENTODO_SYNC_
 
 ### Recurrence
 
-Completing a repeating task through the API (`.../complete`) moves it to its next date under the same id and **unticks its checklist items** (verified 2026-11-22). `repeatFlag` is an RRULE string plus `repeatFrom`, returned as a string (`"0"` from due date, `"1"` from completion date, `"2"` calendar; `"2"` behaves like `"0"` in practice). **Verified 2026-11-22:** an update with `repeatFlag: ""` removes the rule. Completing a recurring task keeps the same task ID and advances its dates. The completed instance gets a new ID (**UNVERIFIED**, observed behaviour of the apps). v1 syncs only the current `dueDate`; `repeatFlag` and `reminders` are preserved on update because the full task is merged.
+Completing a repeating task through the API (`.../complete`) moves it to its next date under the same id and **unticks its checklist items** (verified 2026-11-22). `repeatFlag` is an RRULE string plus `repeatFrom`, returned as a string (`"0"` from due date, `"1"` from completion date, `"2"` calendar; `"2"` behaves like `"0"` in practice). **Verified 2026-11-22:** an update with `repeatFlag: ""` removes the rule. Completing a recurring task keeps the same task ID and advances its dates. The completed instance gets a new ID (**UNVERIFIED**, observed behaviour of the apps). Updates merge over the full task, so fields the sync doesn't model are preserved.
+
+### Reminders
+
+`reminders` is a list of iCalendar `TRIGGER:` durations from the due time (`TRIGGER:PT0S` at due time, `TRIGGER:-PT30M`, `TRIGGER:-P1D`). For an all-day task they count from **midnight** of the day (`TRIGGER:P0DT9H0M0S` is 09:00 on the day, `TRIGGER:-P0DT15H0M0S` 09:00 the day before); the apps write that long form. `TRIGGER:-PT0S` occurs too and means the same as `PT0S`.
 
 ## OpenTodo REST API
 
@@ -122,6 +126,10 @@ Source: OpenTodo `docs/e2ee.md`, `docs/api.md` ("End-to-end encryption") and the
 - `description` is the Markdown projection of `notes_doc` (the rich-text doc). A REST write of `description` alone is folded into the doc by the next device that opens the note.
 - Label create refuses an empty `name` (`label.name must not be empty`). Task create needs no title.
 
+### Reminders
+
+Separate records, not task fields: `GET /api/v1/reminders` → `{"reminders": [{id, task_id, kind, offset_minutes, fire_at, delivered_at, dismissed_at, created_at, deleted_at}]}`; `POST /api/v1/reminders` `{task_id, kind, offset_minutes}` (accepts `Idempotency-Key`); `PATCH`/`DELETE /api/v1/reminders/{id}`. Kinds: `relative` (minutes from the due time; a date-only due counts from **09:00** in the zone the user's devices last reported), `absolute` (`fire_at`), `deadline`, `arrive`/`leave` (location). The server computes and recomputes `fire_at` of relative reminders when `due` changes, also on a REST `PATCH`. No content fields, so nothing is encrypted. Reminders are personal (per user). Source: OpenTodo `docs/api.md` "Reminders and push" and `docs/sync.md` "Reminders"; OpenTodo's own TickTick importer applies the same −540 shift to all-day triggers (`internal/importer/profile_ticktick.go`).
+
 ### Project object
 
 `id, name, color, icon, description, parent_id, position, archived, status, flow_mode, workspace_id, created_at, deleted_at`. There is **no Inbox project object**: the Inbox is `project_id: null`.
@@ -137,6 +145,7 @@ Source: OpenTodo `docs/e2ee.md`, `docs/api.md` ("End-to-end encryption") and the
 | tags | `tags` (names, lowercased) | `labels` (IDs → names, lowercased; missing labels created) |
 | completed | `status` ∈ {2, -1} | `completed_at != null` |
 | project | `projectId` (inbox ID → Inbox) | `project_id` (`null` → Inbox) |
+| reminders | `reminders[]` `TRIGGER:` durations; all-day: from midnight (offset = minutes − 540) | `relative` reminders' `offset_minutes` (other kinds left alone) |
 
 The default zone is `TICKTICK_OPENTODO_SYNC_TIMEZONE`, falling back to TickTick's `preference.timeZone` and then to UTC.
 

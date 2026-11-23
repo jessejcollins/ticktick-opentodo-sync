@@ -561,12 +561,16 @@ class Syncer:
         ot_id = str(resp["id"])
         w.mapper.link_task(a.tt_id, ot_id)
         raw = w.tt_raw.get(a.tt_id) or {}
+        readback = w.mapper.from_ot(resp)
+        tt_hash = a.tt_hash or a.task.content_hash()
+        if readback.reminders != a.task.reminders:
+            tt_hash = ""  # reminders failed (logged): TickTick pushes them again next pass
         self.state.put_pair(
             Pair(
                 tt_id=a.tt_id,
                 ot_id=ot_id,
-                tt_hash=a.tt_hash or a.task.content_hash(),
-                ot_hash=w.mapper.from_ot(resp).content_hash(),
+                tt_hash=tt_hash,
+                ot_hash=readback.content_hash(),
                 tt_project=str(raw.get("projectId") or w.mapper.tt_project_id(a.task.project)),
                 base=a.task,
             )

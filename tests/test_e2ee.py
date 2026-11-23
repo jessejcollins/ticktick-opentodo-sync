@@ -126,6 +126,7 @@ CONTENT = {
     "tasks": ("task", ("title", "description")),
     "projects": ("project", ("name",)),
     "labels": ("label", ("name",)),
+    "reminders": ("reminder", ()),
 }
 
 
@@ -158,7 +159,8 @@ class EncryptedServer:
         router.get(f"{OT}/api/v1/encryption/keys").mock(
             return_value=httpx.Response(200, json={"keys": record})
         )
-        pattern = re.compile(rf"{OT}/api/v1/(tasks|projects|labels)(?:/([^/?]+))?(?:\?.*)?$")
+        colls = "|".join(CONTENT)
+        pattern = re.compile(rf"{OT}/api/v1/({colls})(?:/([^/?]+))?(?:\?.*)?$")
         router.route(url__regex=pattern.pattern).mock(side_effect=self.handle)
 
     def handle(self, request: httpx.Request) -> httpx.Response:

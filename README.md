@@ -2,8 +2,8 @@
 
 Two-way task sync between **TickTick** (primary, wins every conflict) and a self-hosted **OpenTodo**. It runs as a small, locked-down Docker Compose service on a Raspberry Pi next to Pi-hole and makes one pass every 5 minutes.
 
-- Syncs title, notes, due date/time/zone, priority, tags ↔ labels, completion, list ↔ project, repeat rules, and subtasks (TickTick checklist items and subtasks ↔ OpenTodo subtasks).
-- Not synced: reminders, attachments, comments, habits.
+- Syncs title, notes, due date/time/zone, priority, tags ↔ labels, completion, list ↔ project, repeat rules, reminders, and subtasks (TickTick checklist items and subtasks ↔ OpenTodo subtasks).
+- Not synced: attachments, comments, habits.
 - Rules, decisions and constraints: [CLAUDE.md](CLAUDE.md). API details and the field-mapping table: [docs/api-notes.md](docs/api-notes.md).
 
 ## Setup on the Pi
@@ -102,6 +102,7 @@ docker compose run --rm ticktick-opentodo-sync --apply --allow-bulk
 - **Completed tasks:** TickTick's API only lists open tasks. When a paired task disappears, ticktick-opentodo-sync fetches it once to tell *completed* from *deleted*. TickTick's **Won't Do** counts as completed.
 - **Repeat rules** sync both ways. TickTick's iCalendar rules are translated to OpenTodo's wording (`every 1st saturday of november`, `every 2 weeks after completion`) exactly as OpenTodo's own converter does. A rule OpenTodo can't express stays in TickTick, and that task syncs only its due date. Check before a first run: `docker compose run --rm ticktick-opentodo-sync --recurrence-report` (read-only).
 - **Completing a repeating task:** in OpenTodo, it completes the task once in TickTick. TickTick then picks the next date, and OpenTodo follows on the next pass. In TickTick, OpenTodo just moves to the next date. Skipping in OpenTodo moves the TickTick date.
+- **Reminders:** TickTick reminders ↔ OpenTodo *relative* reminders ("at due time", "30 minutes before", "1 day before at 09:00"…), both ways. OpenTodo reminders at a fixed moment, deadline reminders and location reminders stay in OpenTodo only.
 - **Priority:** TickTick none/low/medium/high (`0/1/3/5`) ↔ OpenTodo `4/3/2/1`.
 - **Subtasks:** TickTick checklist items appear in OpenTodo as subtasks (ticked items as completed ones), and TickTick subtasks as OpenTodo subtasks. Titles and ticks sync both ways; adding and deleting do too. A subtask added in OpenTodo becomes a checklist item if the TickTick task is a checklist, otherwise a TickTick subtask. One level only. Reordering isn't synced. On a conflict TickTick wins, including whether an item is ticked.
 - **Out of scope** (left alone): closed TickTick lists, archived OpenTodo projects, sub-subtasks, OpenTodo habits and recurrence occurrences.

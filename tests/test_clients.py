@@ -100,13 +100,16 @@ def test_opentodo_endpoints() -> None:
     lst = respx.get(f"{OT}/api/v1/tasks").mock(
         return_value=httpx.Response(200, json={"tasks": [{"id": "a"}]})
     )
-    assert ot.tasks() == [{"id": "a"}]
+    respx.get(f"{OT}/api/v1/reminders").mock(
+        return_value=httpx.Response(200, json={"reminders": []})
+    )
+    assert ot.tasks() == [{"id": "a", "reminders": []}]
     assert lst.calls[0].request.url.params["include_deleted"] == "true"
 
     create = respx.post(f"{OT}/api/v1/tasks").mock(
         return_value=httpx.Response(201, json={"id": "n"})
     )
-    assert ot.create_task({"title": "x"}, idempotency_key="key-1") == {"id": "n"}
+    assert ot.create_task({"title": "x"}, idempotency_key="key-1") == {"id": "n", "reminders": []}
     assert create.calls[0].request.headers["Idempotency-Key"] == "key-1"
 
     patch = respx.patch(f"{OT}/api/v1/tasks/n").mock(
@@ -122,3 +125,50 @@ def test_opentodo_endpoints() -> None:
         return_value=httpx.Response(200, json={"labels": [{"id": "l"}]})
     )
     assert ot.labels() == [{"id": "l"}]
+
+
+@respx.mock
+def test_opentodo_reminders() -> None:
+    """Only live relative reminders are read and reconciled; other kinds are left alone."""
+    ot = OpenTodo(http(OT))
+    respx.get(f"{OT}/api/v1/tasks").mock(
+        return_value=httpx.Response(200, json={"tasks": [{"id": "t"}, {"id": "u"}]})
+    )
+    rows = [
+        {"id": "r1", "task_id": "t", "kind": "relative", "offset_minutes": 0, "deleted_at": None},
+        {"id": "r2", "task_id": "t", "kind": "relative", "offset_minutes": -30, "deleted_at": None},
+        {"id": "r3", "task_id": "t", "kind": "relative", "offset_minutes": -60, "deleted_at": 5},
+        {"id": "r4", "task_id": "t", "kind": "absolute", "fire_at": 1, "deleted_at": None},
+        {"id": "r5", "task_id": "t", "kind": "deadline", "offset_minutes": 0, "deleted_at": None},
+    ]
+    respx.get(f"{OT}/api/v1/reminders").mock(
+        return_value=httpx.Response(200, json={"reminders": rows})
+    )
+    assert {t["id"]: t["reminders"] for t in ot.tasks()} == {"t": [-30, 0], "u": []}
+
+    respx.patch(f"{OT}/api/v1/tasks/t").mock(return_value=httpx.Response(200, json={"id": "t"}))
+    gone = respx.delete(f"{OT}/api/v1/reminders/r2").mock(return_value=httpx.Response(204))
+    new = respx.post(f"{OT}/api/v1/reminders").mock(
+        return_value=httpx.Response(201, json={"id": "r9", "task_id": "t", "kind": "relative"})
+    )
+    resp = ot.update_task("t", {"title": "x", "reminders": [0, -120]})
+    assert resp["reminders"] == [-120, 0]
+    assert gone.called
+    assert json.loads(new.calls[0].request.content) == {
+        "task_id": "t",
+        "kind": "relative",
+        "offset_minutes": -120,
+    }
+    assert new.calls[0].request.headers["Idempotency-Key"].startswith("ticktick-opentodo-sync-")
+    # Unchanged reminders: only the task is written.
+    ot.update_task("t", {"title": "y", "reminders": [-120, 0]})
+    assert new.call_count == 1 and gone.call_count == 1
+
+
+@respx.mock
+def test_opentodo_reminders_refuse_an_odd_listing() -> None:
+    ot = OpenTodo(http(OT))
+    respx.get(f"{OT}/api/v1/tasks").mock(return_value=httpx.Response(200, json={"tasks": []}))
+    respx.get(f"{OT}/api/v1/reminders").mock(return_value=httpx.Response(200, json=[]))
+    with pytest.raises(TypeError):
+        ot.tasks()

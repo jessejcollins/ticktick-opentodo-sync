@@ -66,6 +66,9 @@ class Task:
     """OpenTodo rule (canonical, e.g. ``every monday``), ``ticktick-only:<RRULE>``, or None."""
     parent: str | None = None
     """Subtask: TickTick id of the parent task (``ot:<id>`` while it has no TickTick twin)."""
+    reminders: frozenset[int] = field(default_factory=frozenset)
+    """Reminder offsets in minutes, OpenTodo's way: from the due time, or from 09:00 on the
+    day for an all-day task; negative = before."""
 
     def to_json(self) -> JSON:
         out: JSON = {
@@ -82,6 +85,8 @@ class Task:
             out["recurrence"] = self.recurrence
         if self.parent is not None:
             out["parent"] = self.parent
+        if self.reminders:
+            out["reminders"] = sorted(self.reminders)
         return out
 
     @property
@@ -101,6 +106,7 @@ class Task:
             completed=bool(data.get("completed", False)),
             recurrence=data.get("recurrence"),
             parent=data.get("parent"),
+            reminders=frozenset(data.get("reminders", ())),
         )
 
     def content_hash(self) -> str:

@@ -138,6 +138,7 @@ class FakeOpenTodo:
             "deleted_at": None,
             "parent_id": None,
             "recurrence": None,
+            "reminders": [],
         } | fields
         return oid
 

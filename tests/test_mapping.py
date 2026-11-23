@@ -10,12 +10,16 @@ from ticktick_opentodo_sync.mapping import (
     due_from_ot,
     due_from_tt,
     due_to_tt,
+    format_trigger,
     norm_notes,
+    parse_trigger,
     priority_from_ot,
     priority_from_tt,
     priority_to_ot,
     priority_to_tt,
     reconcile_projects,
+    reminders_from_tt,
+    reminders_to_tt,
 )
 from ticktick_opentodo_sync.models import INBOX, Due, Priority, Task
 
@@ -194,6 +198,7 @@ def test_from_ot_and_to_ot() -> None:
         "due": {"date": "2026-11-20", "time": "10:00", "tz": NY},
         "labels": ["l1"],
         "recurrence": None,
+        "reminders": [],
     }
 
 
@@ -259,3 +264,81 @@ def test_recurrence_to_ot_and_back() -> None:
     assert m.from_ot(raw) == task
     done = m.to_ot(replace(task, completed=True), {}, currently_completed=False, now_ms=1)
     assert done["completed_at"] == 1 and done["recurrence"] is None
+
+
+# --- reminders ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("trigger", "minutes"),
+    [
+        ("TRIGGER:PT0S", 0),
+        ("TRIGGER:-PT0S", 0),
+        ("TRIGGER:-PT30M", -30),
+        ("TRIGGER:-PT1H", -60),
+        ("TRIGGER:-P1D", -1440),
+        ("TRIGGER:-P1DT2H5M", -1565),
+        ("TRIGGER:P0DT9H0M0S", 540),
+        ("TRIGGER:-P0DT15H0M0S", -900),
+        ("TRIGGER:-P1W", -10080),
+        ("trigger:pt5m", 5),
+    ],
+)
+def test_parse_trigger(trigger: str, minutes: int) -> None:
+    assert parse_trigger(trigger) == minutes
+
+
+@pytest.mark.parametrize("text", ["", "TRIGGER:", "TRIGGER:P", "TRIGGER:19700101T000000Z", "x"])
+def test_parse_trigger_rejects(text: str) -> None:
+    assert parse_trigger(text) is None
+
+
+@pytest.mark.parametrize(
+    ("minutes", "all_day", "want"),
+    [
+        (0, False, "TRIGGER:PT0S"),
+        (-30, False, "TRIGGER:-PT30M"),
+        (-90, False, "TRIGGER:-PT1H30M"),
+        (-1440, False, "TRIGGER:-P1D"),
+        (-2940, False, "TRIGGER:-P2DT1H"),
+        (540, True, "TRIGGER:P0DT9H0M0S"),
+        (420, True, "TRIGGER:P0DT7H0M0S"),
+        (-900, True, "TRIGGER:-P0DT15H0M0S"),
+    ],
+)
+def test_format_trigger(minutes: int, all_day: bool, want: str) -> None:
+    assert format_trigger(minutes, all_day=all_day) == want
+    assert parse_trigger(want) == minutes
+
+
+ALL_DAY: dict[str, object] = {"dueDate": "2026-11-25T05:00:00+0000", "isAllDay": True}
+TIMED: dict[str, object] = {"dueDate": "2026-11-25T14:00:00+0000", "isAllDay": False}
+
+
+def test_reminders_from_tt_count_all_day_from_nine() -> None:
+    due_day, due_time = Due("2026-11-25"), Due("2026-11-25", "09:00", NY)
+    raw = ALL_DAY | {"reminders": ["TRIGGER:P0DT7H0M0S", "TRIGGER:-P0DT15H0M0S"]}
+    assert reminders_from_tt(raw, due_day) == {-120, -1440}
+    raw = TIMED | {"reminders": ["TRIGGER:-PT0S", "TRIGGER:-PT30M", "odd"]}
+    assert reminders_from_tt(raw, due_time) == {0, -30}
+
+
+def test_reminders_to_tt_keeps_spelling_and_unknown_entries() -> None:
+    due = Due("2026-11-25", "09:00", NY)
+    raw = TIMED | {"reminders": ["TRIGGER:-PT0S", "odd"]}
+    task = Task("x", due=due, reminders=frozenset({0}))
+    assert reminders_to_tt(task, raw) == {}
+    task = Task("x", due=due, reminders=frozenset({0, -30}))
+    assert reminders_to_tt(task, raw) == {"reminders": ["TRIGGER:-PT30M", "TRIGGER:-PT0S", "odd"]}
+    assert reminders_to_tt(Task("x", due=due), raw) == {"reminders": ["odd"]}
+
+
+def test_reminders_to_tt_all_day() -> None:
+    task = Task("x", due=Due("2026-11-25"), reminders=frozenset({-120, -1440}))
+    assert reminders_to_tt(task, None) == {
+        "reminders": ["TRIGGER:-P0DT15H0M0S", "TRIGGER:P0DT7H0M0S"]
+    }
+    # Switching a timed task to all-day rewrites the triggers for the new anchor.
+    raw = TIMED | {"reminders": ["TRIGGER:PT0S"]}
+    task = Task("x", due=Due("2026-11-25"), reminders=frozenset({0}))
+    assert reminders_to_tt(task, raw) == {"reminders": ["TRIGGER:P0DT9H0M0S"]}

@@ -6,6 +6,7 @@ See docs/api-notes.md ("Field mapping") for the table this implements.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
@@ -171,6 +172,79 @@ def recurrence_to_tt(task: Task, raw: JSON | None) -> JSON:
     return {"repeatFlag": flag, "repeatFrom": frm}
 
 
+# --- reminders ------------------------------------------------------------------------------
+# TickTick: iCalendar TRIGGER durations from the due time, or from midnight for an all-day
+# task ("TRIGGER:P0DT9H0M0S" is 09:00 on the day). OpenTodo (and Task.reminders): minutes from
+# the due time, or from 09:00 for a date-only due. So all-day offsets differ by 540.
+
+ALL_DAY_ANCHOR = 9 * 60
+_TRIGGER = re.compile(
+    r"TRIGGER:([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?",
+    re.IGNORECASE,
+)
+
+
+def parse_trigger(text: str) -> int | None:
+    """Signed minutes of a TickTick ``TRIGGER:`` duration, or None if not one."""
+    m = _TRIGGER.fullmatch(text.strip())
+    if m is None or text.strip().upper() in ("TRIGGER:P", "TRIGGER:-P", "TRIGGER:+P"):
+        return None
+    w, d, h, mi, sec = (int(g or 0) for g in m.groups()[1:])
+    minutes = ((w * 7 + d) * 24 + h) * 60 + mi + sec // 60
+    return -minutes if m.group(1) == "-" else minutes
+
+
+def format_trigger(minutes: int, *, all_day: bool) -> str:
+    """TickTick's own spelling: ``P0DT9H0M0S`` style for all-day tasks, ``-PT30M`` otherwise."""
+    sign = "-" if minutes < 0 else ""
+    d, rest = divmod(abs(minutes), 24 * 60)
+    h, mi = divmod(rest, 60)
+    if all_day:
+        return f"TRIGGER:{sign}P{d}DT{h}H{mi}M0S"
+    if not minutes:
+        return "TRIGGER:PT0S"
+    time_part = (f"{h}H" if h else "") + (f"{mi}M" if mi else "")
+    return f"TRIGGER:{sign}P{f'{d}D' if d else ''}{'T' + time_part if time_part else ''}"
+
+
+def _tt_reminders(raw: JSON, all_day: bool) -> tuple[dict[int, str], list[str]]:
+    """TickTick's reminders as offset -> its spelling, plus the ones that aren't triggers."""
+    known: dict[int, str] = {}
+    other: list[str] = []
+    for r in raw.get("reminders") or []:
+        minutes = parse_trigger(str(r))
+        if minutes is None:
+            other.append(str(r))
+        else:
+            known.setdefault(minutes - ALL_DAY_ANCHOR if all_day else minutes, str(r))
+    return known, other
+
+
+def reminders_from_tt(raw: JSON, due: Due | None) -> frozenset[int]:
+    return frozenset(_tt_reminders(raw, due is not None and due.time is None)[0])
+
+
+def reminders_to_tt(task: Task, raw: JSON | None) -> JSON:
+    """TickTick ``reminders`` to write, or {} to leave them as they are.
+
+    TickTick's spelling of a reminder is kept while it still means the same, and entries
+    that aren't triggers are never dropped.
+    """
+    raw = raw or {}
+    was_all_day = bool(raw.get("isAllDay")) if raw.get("dueDate") else False
+    all_day = task.due is not None and task.due.time is None
+    known, other = _tt_reminders(raw, was_all_day)
+    if was_all_day != all_day:
+        known = {}
+    elif set(known) == set(task.reminders):
+        return {}
+    wanted = [
+        known.get(m) or format_trigger(m + ALL_DAY_ANCHOR if all_day else m, all_day=all_day)
+        for m in sorted(task.reminders)
+    ]
+    return {"reminders": wanted + other}
+
+
 # --- project reconciliation -----------------------------------------------------------------
 
 
@@ -296,6 +370,7 @@ class Mapper:
             completed=raw.get("status") in TT_DONE,
             recurrence=recurrence_from_tt(raw, due),
             parent=str(raw["parentId"]) if raw.get("parentId") else None,
+            reminders=reminders_from_tt(raw, due),
         )
 
     def to_tt(self, task: Task, raw: JSON | None = None) -> JSON:
@@ -324,6 +399,7 @@ class Mapper:
         ):
             out["startDate"] = new_due
         out |= recurrence_to_tt(task, raw)
+        out |= reminders_to_tt(task, raw)
         if task.parent and not task.parent.startswith(PENDING_PREFIX):
             out["parentId"] = task.parent
         return out
@@ -358,6 +434,7 @@ class Mapper:
             completed=raw.get("completed_at") is not None,
             recurrence=str(raw["recurrence"]) if raw.get("recurrence") else None,
             parent=self._ot_parent_key(raw.get("parent_id")),
+            reminders=frozenset(int(m) for m in raw.get("reminders") or ()),
         )
 
     def _ot_parent_key(self, parent_id: object) -> str | None:
@@ -381,6 +458,7 @@ class Mapper:
             "priority": priority_to_ot(task.priority),
             "labels": sorted(label_ids[t] for t in task.tags if t in label_ids),
             "project_id": self.ot_project_id(task.project),
+            "reminders": sorted(task.reminders),  # the client reconciles these
         }
         if not task.ticktick_only_rule:
             out["recurrence"] = task.recurrence

@@ -512,3 +512,55 @@ def test_repeating_checklist_completed_in_opentodo(env: Env) -> None:
     assert all(s["completed_at"] is None for s in subtasks(env, "Pack").values())
     assert all(i["status"] == 0 for i in env.tt.tasks[tid]["items"])
     env.assert_quiet()
+
+
+# --- reminders --------------------------------------------------------------------------------
+
+TIMED: dict[str, Any] = {"dueDate": "2026-11-25T14:00:00+0000", "isAllDay": False, "timeZone": NY}
+ALL_DAY: dict[str, Any] = {"dueDate": "2026-11-25T05:00:00+0000", "isAllDay": True, "timeZone": NY}
+
+
+def test_ticktick_reminders_are_seeded(env: Env) -> None:
+    env.tt.add_task("Timed", reminders=["TRIGGER:PT0S"], **TIMED)
+    env.tt.add_task("Morning", reminders=["TRIGGER:P0DT7H0M0S"], **ALL_DAY)
+    assert env.run().ot.created == 2
+    assert env.ot_by_title("Timed")["reminders"] == [0]
+    assert env.ot_by_title("Morning")["reminders"] == [-120]
+    env.assert_quiet()
+
+
+def test_reminder_added_in_ticktick_to_an_existing_pair(env: Env) -> None:
+    tid = env.tt.add_task("Call", **TIMED)
+    env.run()
+    env.tt.tasks[tid]["reminders"] = ["TRIGGER:-PT30M"]
+    res = env.run()
+    assert res.ot.updated == 1 and not res.tt.updated, res.summary()
+    assert env.ot_by_title("Call")["reminders"] == [-30]
+    env.assert_quiet()
+
+
+def test_reminders_changed_in_opentodo_go_to_ticktick(env: Env) -> None:
+    tid = env.tt.add_task("Call", reminders=["TRIGGER:-PT0S"], **TIMED)
+    env.run()
+    env.ot_by_title("Call")["reminders"] = [-30, 0]
+    res = env.run()
+    assert res.tt.updated == 1 and not res.ot.updated, res.summary()
+    assert env.tt.tasks[tid]["reminders"] == ["TRIGGER:-PT30M", "TRIGGER:-PT0S"]
+    env.assert_quiet()
+
+    env.ot_by_title("Call")["reminders"] = []
+    assert env.run().tt.updated == 1
+    assert env.tt.tasks[tid]["reminders"] == []
+    env.assert_quiet()
+
+
+def test_reminder_conflict_ticktick_wins(env: Env) -> None:
+    tid = env.tt.add_task("Call", reminders=["TRIGGER:PT0S"], **TIMED)
+    env.run()
+    env.tt.tasks[tid]["reminders"] = ["TRIGGER:-PT1H"]
+    env.ot_by_title("Call")["reminders"] = [-15]
+    res = env.run()
+    assert res.conflicts == 1 and res.ot.updated == 1, res.summary()
+    assert env.ot_by_title("Call")["reminders"] == [-60]
+    assert env.tt.tasks[tid]["reminders"] == ["TRIGGER:-PT1H"]
+    env.assert_quiet()

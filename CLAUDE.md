@@ -44,10 +44,10 @@ TickTick is primary. For each task pair, keep a record of what each side looked 
 
 ### Fields (v1)
 
-Sync: title, notes/description, due date (+ time and time zone), priority (map TickTick's 0/1/3/5 onto OpenTodo's scale and document the mapping), tags, completed status, list/project, and (phase 2, 2026-11-22) recurrence rules, subtasks and checklist items.
+Sync: title, notes/description, due date (+ time and time zone), priority (map TickTick's 0/1/3/5 onto OpenTodo's scale and document the mapping), tags, completed status, list/project, and (phase 2, 2026-11-22) recurrence rules, subtasks and checklist items, and (phase 3, 2026-11-22) reminders.
 
-Leave out of v1 (sync these later if wanted):
-- Attachments, comments, reminders, focus/pomodoro data, habits.
+Leave out (sync these later if wanted):
+- Attachments, comments, focus/pomodoro data, habits.
 
 ## API facts
 
@@ -122,6 +122,10 @@ Answers to questions asked during the build (2026-11-21). Treat as settled.
   - A **new OpenTodo subtask** becomes a checklist item under a TickTick CHECKLIST task, otherwise a TickTick child task (Jesse's choice: each app keeps its natural form). Subtasks of a brand-new parent follow one pass later.
   - Item conflicts: TickTick wins outright, done state included (a repeating TickTick checklist resets its items, which must not be re-ticked from OpenTodo). After a repeating task is completed in OpenTodo, its items are resynced from TickTick on the next pass.
   - The bulk guard counts item deletions in TickTick, not in OpenTodo (OpenTodo's copies can be recreated).
+- **Reminders (phase 3, 2026-11-22).** `Task.reminders` holds offsets in minutes the OpenTodo way: from the due time, or from 09:00 for an all-day task (TickTick counts all-day triggers from midnight, so they differ by 540). They sync like any other field (hashes, TickTick wins conflicts).
+  - TickTick `reminders[]` `TRIGGER:` durations ↔ OpenTodo `relative` reminders (`/api/v1/reminders`, separate records the client reconciles). TickTick's own spelling is kept while it means the same (`-PT0S`); non-trigger entries are never dropped.
+  - OpenTodo `absolute`, `deadline` and location reminders have no TickTick equivalent: left alone, never synced or deleted.
+  - No reminder hash migration was needed: tasks without reminders keep their old hashes. The first dry run (2026-11-22) planned 162 reminder pushes to OpenTodo and 2 OpenTodo-only reminders to TickTick, nothing else.
 - **Closed TickTick lists / archived OpenTodo projects** are out of scope. Their tasks are left alone.
 - **Recurrence (phase 2, 2026-11-22).** Rules sync both ways (`recurrence.py`, a port of OpenTodo's own RRULE converter). Report first with `--recurrence-report` (read-only).
   - A TickTick rule OpenTodo can't express exactly is kept in TickTick only (`ticktick-only:` in state) and never cleared from the OpenTodo side; that task syncs its due date only. If TickTick already holds the same rule in a different spelling, its spelling is kept.

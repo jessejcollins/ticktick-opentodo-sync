@@ -307,3 +307,49 @@ def test_full_sync_against_encrypted_opentodo(server: EncryptedServer, tmp_path:
     assert any(t["title"] == "Report v2" for t in tt.tasks.values())
     assert not any(e2ee.is_ciphertext(v) for t in tt.tasks.values() for v in t.values())
     state.close()
+
+
+def test_browser_saving_the_placeholder_is_repaired(
+    server: EncryptedServer, tmp_path: Path
+) -> None:
+    """2026-11-22: an open browser saved its sealed copy of the create placeholder over
+    the content PATCHed a moment earlier. The next pass rewrites OpenTodo from TickTick."""
+    tt = FakeTickTick()
+    tt.add_task("CLR shower tub, stop", content="the good one")
+    state = State(tmp_path / "s.db")
+    syncer = Syncer(tt, client(passphrase=PASSPHRASE), state)
+    assert syncer.run(dry_run=False).ot.created == 1
+
+    ((oid, task),) = server.data["tasks"].items()
+    for f in ("title", "description"):
+        task[f] = server.key.seal("task", oid, f, PLACEHOLDER)
+    # A create interrupted before it was paired: left alone, never copied to TickTick.
+    server.data["tasks"]["t99"] = {
+        "id": "t99",
+        "title": PLACEHOLDER,
+        "labels": [],
+        "completed_at": None,
+        "deleted_at": None,
+    }
+    tt_writes = len(tt.writes)
+
+    res = syncer.run(dry_run=False)
+    assert res.ok and res.ot.updated == 1 and not res.ot.created, res.summary()
+    assert len(tt.writes) == tt_writes
+    plain = {t["id"]: t for t in server.plain("tasks")}
+    assert (plain[oid]["title"], plain[oid]["description"]) == (
+        "CLR shower tub, stop",
+        "the good one",
+    )
+    assert e2ee.is_ciphertext(server.data["tasks"][oid]["title"])
+
+    res = syncer.run(dry_run=False)
+    assert not res.changed and res.ok, res.summary()
+    assert len(tt.writes) == tt_writes
+    state.close()
+
+
+def test_ticktick_refuses_the_placeholder() -> None:
+    tt = TickTick(Http("t", "https://tt.example", "x", min_interval=0))
+    with pytest.raises(CiphertextWriteError, match="placeholder"):
+        tt.update_task("x", {"id": "x", "title": PLACEHOLDER})

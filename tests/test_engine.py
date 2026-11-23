@@ -14,6 +14,7 @@ from ticktick_opentodo_sync.engine import (
     plan,
 )
 from ticktick_opentodo_sync.models import Task
+from ticktick_opentodo_sync.opentodo import PLACEHOLDER
 
 T = Task(title="Buy paint", project="p1", notes="green")
 
@@ -177,3 +178,52 @@ def test_match_existing_pairs_unique_titles_only() -> None:
     assert sorted(m.tt_unmatched) == ["b", "c", "d"]
     assert sorted(m.ot_unmatched) == ["2", "3", "4"]
     assert m.ambiguous == [("p1", "dup")]
+
+
+# --- OpenTodo content overwritten with the create placeholder (browser race) ---------------
+
+PH = replace(T, title=PLACEHOLDER, notes=PLACEHOLDER)
+
+
+def damaged(task: Task = PH) -> Snapshot:
+    return Snapshot(tasks={"ot1": task}, damaged={"ot1"})
+
+
+def test_placeholder_is_rewritten_from_last_sync() -> None:
+    acts = plan([pair()], Snapshot(tasks={"tt1": T}), damaged())
+    assert kinds(acts) == [Kind.UPDATE_OT]
+    assert acts[0].task == T and acts[0].tt_hash is None and not acts[0].conflict
+    assert "placeholder" in acts[0].note
+
+
+def test_placeholder_with_ticktick_unchanged_and_not_fetched() -> None:
+    acts = plan([pair()], Snapshot(unchanged={"tt1"}), damaged())
+    assert kinds(acts) == [Kind.UPDATE_OT] and acts[0].task == T
+
+
+def test_placeholder_and_ticktick_edit() -> None:
+    new = replace(T, title="Buy more paint")
+    acts = plan([pair()], Snapshot(tasks={"tt1": new}), damaged())
+    assert kinds(acts) == [Kind.UPDATE_OT]
+    assert acts[0].task == new and not acts[0].conflict and "placeholder" in acts[0].note
+
+
+def test_placeholder_never_reaches_ticktick_but_other_opentodo_edits_do() -> None:
+    edited = replace(PH, completed=True)
+    acts = plan([pair()], Snapshot(tasks={"tt1": T}), damaged(edited))
+    assert kinds(acts) == [Kind.UPDATE_OT, Kind.UPDATE_TT]
+    want = replace(T, completed=True)
+    assert all(a.task == want for a in acts)
+    assert acts[0].tt_hash is None and acts[1].ot_hash is None
+
+
+def test_placeholder_same_change_on_both_sides() -> None:
+    done = replace(T, completed=True)
+    acts = plan([pair()], Snapshot(tasks={"tt1": done}), damaged(replace(PH, completed=True)))
+    assert kinds(acts) == [Kind.UPDATE_OT]
+    assert acts[0].task == done and acts[0].tt_hash == done.content_hash()
+    assert not acts[0].completes
+
+
+def test_placeholder_task_deleted_in_ticktick_is_deleted() -> None:
+    assert kinds(plan([pair()], Snapshot(), damaged())) == [Kind.DELETE_OT]

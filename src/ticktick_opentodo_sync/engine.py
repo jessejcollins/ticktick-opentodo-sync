@@ -49,6 +49,16 @@ class Snapshot:
     out_of_scope: set[str] = field(default_factory=set)
     completed_occurrences: dict[str, set[str]] = field(default_factory=dict)
     """OpenTodo only: repeating task id -> dates of its completed occurrence records."""
+    damaged: set[str] = field(default_factory=set)
+    """OpenTodo only: paired ids whose title/notes are the sync's create placeholder.
+
+    An open browser can save its encrypted copy of the placeholder over the content the
+    sync PATCHed right after the create. The placeholder is never an edit: the content
+    from the last sync stands in for it, and OpenTodo is rewritten.
+    """
+
+
+REPAIR_NOTE = "OpenTodo held the create placeholder: rewritten"
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +136,58 @@ def _plan_pair(
 ) -> list[Action]:
     if p.tt_id in tt.out_of_scope or p.ot_id in ot.out_of_scope:
         return []
+    ot_task = ot.tasks.get(p.ot_id)
+    if ot_task is None or p.ot_id not in ot.damaged:
+        return _plan_rules(p, tt, ot, completion_sticks=completion_sticks)
+    return _plan_repair(p, ot_task, tt, ot, completion_sticks=completion_sticks)
 
+
+def _plan_repair(
+    p: Pair, damaged: Task, tt: Snapshot, ot: Snapshot, *, completion_sticks: bool
+) -> list[Action]:
+    """Plan as if OpenTodo still held the content from the last sync, then rewrite it."""
+    tt_now = p.base if p.tt_id in tt.unchanged else tt.tasks.get(p.tt_id)
+    source = p.base or tt_now
+    if source is None:  # nothing to repair from (and TickTick is gone: delete as usual)
+        return _plan_rules(p, tt, ot, completion_sticks=completion_sticks)
+    repaired = replace(damaged, title=source.title, notes=source.notes)
+    view = replace(ot, tasks={**ot.tasks, p.ot_id: repaired})
+    out = _plan_rules(p, tt, view, completion_sticks=completion_sticks)
+    if any(a.kind in (Kind.UPDATE_OT, Kind.DELETE_OT) or a.occurrence for a in out):
+        # Already rewrites or removes OpenTodo (or a repeat moves on first: next pass).
+        return [
+            replace(a, note=f"{a.note}; {REPAIR_NOTE}") if a.kind is Kind.UPDATE_OT else a
+            for a in out
+        ]
+    if tt_now is None:
+        return out
+    target, tt_hash = tt_now, None
+    rest: list[Action] = []
+    for a in out:
+        if a.kind is Kind.REHASH:
+            assert a.task is not None
+            target, tt_hash = a.task, a.tt_hash
+        elif a.kind is Kind.UPDATE_TT:
+            assert a.task is not None
+            target = a.task
+            rest.append(replace(a, ot_hash=None))  # the OpenTodo write records its own
+        else:
+            rest.append(a)
+    fix = Action(
+        Kind.UPDATE_OT,
+        tt_id=p.tt_id,
+        ot_id=p.ot_id,
+        task=target,
+        tt_hash=tt_hash,
+        completes=target.completed and not damaged.completed,
+        note=REPAIR_NOTE,
+    )
+    return [fix, *rest]
+
+
+def _plan_rules(
+    p: Pair, tt: Snapshot, ot: Snapshot, *, completion_sticks: bool = True
+) -> list[Action]:
     tt_task: Task | None
     if p.tt_id in tt.unchanged and p.base is not None:
         tt_task, tt_changed = p.base, False

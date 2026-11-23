@@ -7,6 +7,7 @@ from typing import Any, cast
 from .e2ee import is_ciphertext
 from .http import Http
 from .models import JSON
+from .opentodo import PLACEHOLDER
 
 BASE_URL = "https://api.ticktick.com"
 
@@ -16,9 +17,11 @@ class CiphertextWriteError(ValueError):
 
 
 def refuse_ciphertext(body: object, path: str = "body") -> None:
-    """Raise if any string anywhere in ``body`` is an OpenTodo ``enc:vN:`` value."""
+    """Raise if any string in ``body`` is OpenTodo ciphertext or the sync's create placeholder."""
     if is_ciphertext(body):
         raise CiphertextWriteError(f"refusing to write OpenTodo ciphertext to TickTick ({path})")
+    if body == PLACEHOLDER:
+        raise CiphertextWriteError(f"refusing to write the create placeholder to TickTick ({path})")
     if isinstance(body, dict):
         for k, v in body.items():
             refuse_ciphertext(v, f"{path}.{k}")

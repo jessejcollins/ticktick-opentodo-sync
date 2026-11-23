@@ -307,6 +307,7 @@ class Syncer:
                 w.label_ids.setdefault(name, str(label["id"]))
 
         children: list[JSON] = []
+        paired = {p.ot_id for p in w.pairs.values()}
         for raw in self.ot.tasks():
             oid = str(raw.get("id") or "")
             if not oid:
@@ -327,7 +328,10 @@ class Syncer:
             if raw.get("parent_id"):
                 children.append(raw)
                 continue
-            if _unreadable(raw, "title") or unreadable_labels.intersection(raw.get("labels") or []):
+            if not _damaged(w.ot, raw, paired):
+                w.ot.out_of_scope.add(oid)
+                continue
+            if raw.get(UNREADABLE) or unreadable_labels.intersection(raw.get("labels") or []):
                 # Never let unreadable content look like an edit (or a deletion).
                 log.warning("OpenTodo task %s: content or a label unreadable; skipping it", oid)
                 w.ot.out_of_scope.add(oid)
@@ -359,6 +363,11 @@ class Syncer:
         task_ot_ids = {p.ot_id for p in w.pairs.values()}
         for raw in children:
             oid, parent_ot = str(raw["id"]), str(raw["parent_id"])
+            snap = w.ot_items if oid in item_ot_ids else w.ot
+            if not _damaged(snap, raw, item_ot_ids.keys() | task_ot_ids):
+                w.ot.out_of_scope.add(oid)
+                w.ot_items.out_of_scope.add(oid)
+                continue
             parent_tt = w.mapper.ot_to_tt_task.get(parent_ot)
             parent_raw = w.ot_raw.get(parent_ot)
             kind = (w.tt_raw.get(parent_tt or "") or {}).get("kind")
@@ -369,7 +378,7 @@ class Syncer:
                 parent_raw is None  # parent out of scope
                 or parent_raw.get("parent_id")  # a deeper level
                 or parent_tt is None  # parent not in TickTick yet: next pass
-                or _unreadable(raw, "title")
+                or raw.get(UNREADABLE)
             ):
                 w.ot.out_of_scope.add(oid)
                 w.ot_items.out_of_scope.add(oid)
@@ -983,6 +992,26 @@ def _count(a: Action, res: PassResult) -> None:
         side.completed += a.completes
     elif a.kind in (Kind.DELETE_OT, Kind.DELETE_TT):
         side.deleted += 1
+
+
+def _damaged(snap: Snapshot, raw: JSON, paired: Iterable[str]) -> bool:
+    """Flag a paired task holding the create placeholder; ``False`` = leave it alone.
+
+    Paired: the engine repairs it (see ``Snapshot.damaged``). Unpaired: a create that was
+    interrupted before it was recorded, which only a person should delete.
+    """
+    if raw.get(UNREADABLE) or PLACEHOLDER not in (raw.get("title"), raw.get("description")):
+        return True
+    oid = str(raw["id"])
+    if oid in paired:
+        snap.damaged.add(oid)
+        return True
+    log.warning(
+        "OpenTodo task %s: left over from an interrupted create (placeholder content, "
+        "not paired); delete it in OpenTodo",
+        oid,
+    )
+    return False
 
 
 def _unreadable(obj: JSON, content_field: str) -> bool:

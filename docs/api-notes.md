@@ -71,7 +71,7 @@ Not documented. ticktick-opentodo-sync spaces requests (`TICKTICK_OPENTODO_SYNC_
 
 ### Recurrence
 
-Completing a repeating task through the API (`.../complete`) moves it to its next date under the same id and **unticks its checklist items** (verified 2026-11-22). `repeatFlag` is an RRULE string plus `repeatFrom`, returned as a string (`"0"` from due date, `"1"` from completion date, `"2"` calendar; `"2"` behaves like `"0"` for the user's daily tasks). **Verified 2026-11-22:** an update with `repeatFlag: ""` removes the rule. Completing a recurring task keeps the same task ID and advances its dates. The completed instance gets a new ID (**UNVERIFIED**, observed behaviour of the apps). Updates merge over the full task, so fields the sync doesn't model are preserved.
+Completing a repeating task through the API (`.../complete`) moves it to its next date under the same id and **unticks its checklist items** (verified 2026-11-22). `repeatFlag` is an RRULE string plus `repeatFrom`, returned as a string (`"0"` from due date, `"1"` from completion date, `"2"` calendar; `"2"` behaves like `"0"` for the user's daily tasks). **Verified 2026-11-22:** an update with `repeatFlag: ""` removes the rule. Completing a recurring task keeps the same task ID and advances its dates. The completed instance is a **separate task with a new ID**, `status` 2, the old `dueDate` and `completedTime`, listed by `POST /open/v1/task/completed` (filters on completion time; verified 2026-11-23 for both app and API completions). The live task carries no link to it: match by list, title and old due date. Updates merge over the full task, so fields the sync doesn't model are preserved.
 
 ### Reminders
 
@@ -129,6 +129,10 @@ Source: OpenTodo `docs/e2ee.md`, `docs/api.md` ("End-to-end encryption") and the
 ### Reminders
 
 Separate records, not task fields: `GET /api/v1/reminders` → `{"reminders": [{id, task_id, kind, offset_minutes, fire_at, delivered_at, dismissed_at, created_at, deleted_at}]}`; `POST /api/v1/reminders` `{task_id, kind, offset_minutes}` (accepts `Idempotency-Key`); `PATCH`/`DELETE /api/v1/reminders/{id}`. Kinds: `relative` (minutes from the due time; a date-only due counts from **09:00** in the zone the user's devices last reported), `absolute` (`fire_at`), `deadline`, `arrive`/`leave` (location). The server computes and recomputes `fire_at` of relative reminders when `due` changes, also on a REST `PATCH`. No content fields, so nothing is encrypted. Reminders are personal (per user). Source: OpenTodo `docs/api.md` "Reminders and push" and `docs/sync.md` "Reminders"; OpenTodo's own TickTick importer applies the same −540 shift to all-day triggers (`internal/importer/profile_ticktick.go`).
+
+### Recurring occurrences
+
+`POST /api/v1/tasks/{id}/occurrences/{date}/complete` (`{completed_at?}`): on the current occurrence, writes a completed record (`series_id`, `occurrence_date`) and moves the series to its next date. Refused (`400 not_an_occurrence`) for a date before the current occurrence or a rule that repeats after completion. Also `…/skip` and `PATCH …/occurrences/{date}`. On an encrypted account the record carries no title until an unlocked device fills it in.
 
 ### Project object
 

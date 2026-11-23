@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import copy
 import itertools
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
+from ticktick_opentodo_sync.http import ApiError
 from ticktick_opentodo_sync.mapping import format_tt_datetime, parse_tt_datetime
 from ticktick_opentodo_sync.models import JSON
 
@@ -90,12 +91,23 @@ class FakeTickTick:
         t = self.tasks[task_id]
         if t.get("repeatFlag") and t.get("dueDate"):
             # Recurring: the task stays open and advances; a completed copy is split off.
-            done = copy.deepcopy(t) | {"id": _id("tt"), "status": 2}
+            done = copy.deepcopy(t) | {
+                "id": _id("tt"),
+                "status": 2,
+                "completedTime": "2026-11-23T03:00:00+0000",
+            }
             self.tasks[done["id"]] = done
             nxt = parse_tt_datetime(t["dueDate"]) + timedelta(days=1)
             t["dueDate"] = t["startDate"] = format_tt_datetime(nxt)
         else:
             t["status"] = 2
+
+    def completed_tasks(self, project_ids: list[str], start: Any, end: Any) -> list[JSON]:
+        return [
+            copy.deepcopy(t)
+            for t in self.tasks.values()
+            if t["status"] in (2, -1) and t["projectId"] in project_ids
+        ]
 
     def delete_task(self, project_id: str, task_id: str) -> None:
         self.writes.append(("delete", task_id))
@@ -118,6 +130,7 @@ class FakeOpenTodo:
         self.tasks_: dict[str, JSON] = {}
         self.writes: list[tuple[str, Any]] = []
         self.idempotency: dict[str, str] = {}
+        self.refuse_occurrences = False
 
     def add_project(self, name: str, *, archived: bool = False) -> str:
         pid = _id("otp")
@@ -184,6 +197,23 @@ class FakeOpenTodo:
         self.writes.append(("update", body))
         self.tasks_[task_id] |= body
         return copy.deepcopy(self.tasks_[task_id])
+
+    def complete_occurrence(self, task_id: str, date: str, completed_at: int | None) -> JSON:
+        """Like OpenTodo: a completed record for ``date``, and the series moves on a day."""
+        self.writes.append(("complete_occurrence", (task_id, date, completed_at)))
+        series = self.tasks_[task_id]
+        if self.refuse_occurrences or (series.get("due") or {}).get("date") != date:
+            raise ApiError("OpenTodo", "POST", "occurrence", 400, "not_an_occurrence")
+        record = self.add_task(series["title"], series["project_id"])
+        self.tasks_[record] |= {
+            "series_id": task_id,
+            "occurrence_date": date,
+            "completed_at": completed_at or 1,
+            "due": copy.deepcopy(series["due"]),
+        }
+        nxt = (datetime.fromisoformat(date) + timedelta(days=1)).date().isoformat()
+        series["due"] = series["due"] | {"date": nxt}
+        return copy.deepcopy(series)
 
     def delete_task(self, task_id: str) -> None:
         self.writes.append(("delete", task_id))

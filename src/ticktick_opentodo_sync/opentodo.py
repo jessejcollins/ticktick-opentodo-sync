@@ -246,6 +246,14 @@ class OpenTodo:
             )
             current.append(_obj(created) | {"offset_minutes": minutes})
 
+    def complete_occurrence(self, task_id: str, date: str, completed_at: int | None) -> JSON:
+        """Complete one occurrence of a repeating task; the current one moves the series on."""
+        body = {} if completed_at is None else {"completed_at": completed_at}
+        resp = self.http.request(
+            "POST", f"/api/v1/tasks/{task_id}/occurrences/{date}/complete", json=body
+        )
+        return self._open("task", _obj(resp), TASK_CONTENT)
+
     def delete_task(self, task_id: str) -> None:
         """Soft delete (to the Trash)."""
         self.http.request("DELETE", f"/api/v1/tasks/{task_id}", not_found_ok=True)

@@ -77,6 +77,12 @@ class Action:
     """The write marks an open task completed (counts towards the bulk guard)."""
     occurrence: bool = False
     """Completes the TickTick instance of a repeating task completed in OpenTodo."""
+    ot_occurrence: str | None = None
+    """UPDATE_OT only: first complete this date's OpenTodo occurrence (the repeating task was
+    completed in TickTick, which moved it on); set by the sync, which can see TickTick's
+    completed copies."""
+    ot_occurrence_at: int | None = None
+    """When TickTick says it was completed (ms)."""
     note: str = ""
 
     @property

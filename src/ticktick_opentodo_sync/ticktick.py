@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, cast
 
 from .e2ee import is_ciphertext
 from .http import Http
+from .mapping import format_tt_datetime
 from .models import JSON
 from .opentodo import PLACEHOLDER
 
@@ -61,6 +63,15 @@ class TickTick:
         return _obj(
             self.http.request("POST", f"/open/v1/task/{task_id}", json=body | {"id": task_id})
         )
+
+    def completed_tasks(self, project_ids: list[str], start: datetime, end: datetime) -> list[JSON]:
+        """Tasks completed between ``start`` and ``end`` (by completion time; at most 200)."""
+        body = {
+            "projectIds": project_ids,
+            "startDate": format_tt_datetime(start),
+            "endDate": format_tt_datetime(end),
+        }
+        return _list(self.http.request("POST", "/open/v1/task/completed", json=body))
 
     def complete_task(self, project_id: str, task_id: str) -> None:
         self.http.request("POST", f"/open/v1/project/{project_id}/task/{task_id}/complete")

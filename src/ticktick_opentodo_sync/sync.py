@@ -7,7 +7,7 @@ import time
 from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field, replace
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 
 from . import engine, recurrence
@@ -19,11 +19,14 @@ from .mapping import (
     TT_ITEM_DONE,
     Mapper,
     ProjectInfo,
+    due_from_tt,
     item_from_ot,
     item_from_tt,
+    norm_title,
+    parse_tt_datetime,
     reconcile_projects,
 )
-from .models import INBOX, JSON, PENDING_PREFIX, Task, changed_fields
+from .models import INBOX, JSON, PENDING_PREFIX, TICKTICK_ONLY_PREFIX, Task, changed_fields
 from .opentodo import PLACEHOLDER, UNREADABLE
 from .state import ITEMS, State
 
@@ -38,6 +41,9 @@ class TickTickApi(Protocol):
     def create_task(self, body: JSON) -> JSON: ...
     def update_task(self, task_id: str, body: JSON) -> JSON: ...
     def complete_task(self, project_id: str, task_id: str) -> None: ...
+    def completed_tasks(
+        self, project_ids: list[str], start: datetime, end: datetime
+    ) -> list[JSON]: ...
     def delete_task(self, project_id: str, task_id: str) -> None: ...
     def move_task(self, task_id: str, from_project: str, to_project: str) -> None: ...
     def create_project(self, name: str) -> JSON: ...
@@ -53,6 +59,7 @@ class OpenTodoApi(Protocol):
     def create_task(self, body: JSON, *, idempotency_key: str) -> JSON: ...
     def update_task(self, task_id: str, body: JSON) -> JSON: ...
     def delete_task(self, task_id: str) -> None: ...
+    def complete_occurrence(self, task_id: str, date: str, completed_at: int | None) -> JSON: ...
 
 
 @dataclass
@@ -460,7 +467,7 @@ class Syncer:
                 if not dry_run:
                     return res
 
-        actions = engine.plan(w.pairs.values(), w.tt, w.ot)
+        actions = self._mark_tt_occurrences(engine.plan(w.pairs.values(), w.tt, w.ot), w)
         # Parents before their subtasks, so a new subtask's parent exists when it is created.
         actions.sort(key=lambda a: a.task is not None and a.task.parent is not None)
         item_actions = self._plan_items(w, actions)
@@ -498,6 +505,95 @@ class Syncer:
             if res.changed or res.errors:
                 self.state.set_meta_json("last_change", {"at": self.now_ms()} | res.to_json())
         return res
+
+    def _mark_tt_occurrences(self, actions: list[Action], w: World) -> list[Action]:
+        """Tell a repeating task completed in TickTick from one that was only moved.
+
+        Completing moves the TickTick task on under the same id, like a date change; the
+        difference is a completed copy with the old due date. When there is one, OpenTodo
+        completes that occurrence (a record in its history) instead of just moving.
+        """
+        candidates: dict[str, tuple[Action, Task]] = {}
+        for a in actions:
+            base = w.pairs[a.tt_id].base if a.tt_id in w.pairs else None
+            current = w.ot.tasks.get(a.ot_id or "")
+            if (
+                a.kind is Kind.UPDATE_OT
+                and a.task is not None
+                and base is not None
+                and current is not None
+                and _completable_rule(base.recurrence)
+                and base.due is not None
+                and a.task.due is not None
+                and a.task.due.date > base.due.date
+                and not a.task.completed
+                and not current.completed
+                and current.due == base.due  # OpenTodo still shows the occurrence
+                and current.recurrence == base.recurrence
+                # Completed in OpenTodo already (that flow went the other way).
+                and base.due.date not in w.ot.completed_occurrences.get(a.ot_id or "", set())
+            ):
+                candidates[str(a.tt_id)] = (a, base)
+        if not candidates:
+            return actions
+
+        found = self._tt_completed_copies(candidates, w)
+        out = []
+        for a in actions:
+            hit = found.get(a.tt_id or "")
+            if hit is not None:
+                day, at = hit
+                a = replace(
+                    a,
+                    ot_occurrence=day,
+                    ot_occurrence_at=at,
+                    note=f"repeating task completed in TickTick for {day}",
+                )
+            out.append(a)
+        return out
+
+    def _tt_completed_copies(
+        self, candidates: dict[str, tuple[Action, Task]], w: World
+    ) -> dict[str, tuple[str, int | None]]:
+        """TickTick id -> (occurrence date, completed ms) for candidates with a completed copy."""
+        now = datetime.fromtimestamp(self.now_ms() / 1000, UTC)
+        by_project: dict[str, list[str]] = {}
+        oldest: dict[str, date] = {}
+        for tt_id, (_, base) in candidates.items():
+            pid = str((w.tt_raw.get(tt_id) or {}).get("projectId") or w.pairs[tt_id].tt_project)
+            by_project.setdefault(pid, []).append(tt_id)
+            assert base.due is not None
+            d = date.fromisoformat(base.due.date)
+            oldest[pid] = min(oldest.get(pid, d), d)
+        found: dict[str, tuple[str, int | None]] = {}
+        for pid, tt_ids in by_project.items():
+            # Completed at or after the old due day (a day early for zones), at most 30 days.
+            start = max(
+                datetime.combine(oldest[pid] - timedelta(days=1), datetime.min.time(), UTC),
+                now - timedelta(days=30),
+            )
+            try:
+                copies = self.tt.completed_tasks([pid], start, now + timedelta(minutes=5))
+            except Exception as exc:
+                log.warning("could not read TickTick's completed tasks (%s); dates just move", exc)
+                continue
+            if len(copies) >= 200:
+                log.warning("TickTick returned 200 completed tasks for %s; some may be missed", pid)
+            for tt_id in tt_ids:
+                a, base = candidates[tt_id]
+                assert base.due is not None and a.task is not None
+                for c in copies:
+                    if (
+                        str(c.get("id")) != tt_id
+                        and c.get("status") in TT_DONE
+                        and str(c.get("projectId")) == pid
+                        and norm_title(c.get("title")) == base.title
+                        and (due := due_from_tt(c, w.mapper.default_tz)) is not None
+                        and due.date == base.due.date
+                    ):
+                        found[tt_id] = (base.due.date, _ms(c.get("completedTime")))
+                        break
+        return found
 
     def _describe(self, a: Action, w: World) -> str:
         title = a.task.title if a.task else "?"
@@ -598,6 +694,19 @@ class Syncer:
     def _update_ot(self, a: Action, w: World) -> None:
         assert a.tt_id and a.ot_id and a.task
         current = w.ot.tasks[a.ot_id]
+        if a.ot_occurrence:
+            # Records the completion and moves the series on; the PATCH below then sets
+            # TickTick's next date (and anything else that changed).
+            try:
+                self.ot.complete_occurrence(a.ot_id, a.ot_occurrence, a.ot_occurrence_at)
+            except ApiError as exc:
+                if exc.status != 400:
+                    raise
+                log.warning(
+                    "OpenTodo refused to complete the %s occurrence (%s); moving the date only",
+                    a.ot_occurrence,
+                    exc,
+                )
         self._ensure_labels(a.task.tags, w)
         body = w.mapper.to_ot(
             a.task, w.label_ids, currently_completed=current.completed, now_ms=self.now_ms()
@@ -996,6 +1105,22 @@ def _count(a: Action, res: PassResult) -> None:
         side.completed += a.completes
     elif a.kind in (Kind.DELETE_OT, Kind.DELETE_TT):
         side.deleted += 1
+
+
+def _completable_rule(rule: str | None) -> bool:
+    """OpenTodo completes occurrences of a rule it holds, except 'after completion' ones."""
+    if not rule:
+        return False
+    return not rule.startswith(TICKTICK_ONLY_PREFIX) and "after completion" not in rule
+
+
+def _ms(value: object) -> int | None:
+    if not value:
+        return None
+    try:
+        return int(parse_tt_datetime(str(value)).timestamp() * 1000)
+    except ValueError:
+        return None
 
 
 def _damaged(snap: Snapshot, raw: JSON, paired: Iterable[str]) -> bool:

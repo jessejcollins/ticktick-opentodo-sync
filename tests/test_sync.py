@@ -332,17 +332,17 @@ def test_rule_goes_to_opentodo_and_back(env: Env) -> None:
 
 def test_untranslatable_rule_stays_in_ticktick(env: Env) -> None:
     tid = env.tt.add_task(
-        "Gas",
+        "Water plants",
         dueDate="2026-12-06T05:00:00+0000",
         isAllDay=True,
         timeZone=NY,
         repeatFlag="RRULE:FREQ=MONTHLY;BYMONTHDAY=6,10",
     )
     env.run()
-    assert env.ot_by_title("Gas")["recurrence"] is None
-    env.ot_by_title("Gas")["title"] = "Gas!"
+    assert env.ot_by_title("Water plants")["recurrence"] is None
+    env.ot_by_title("Water plants")["title"] = "Water plants!"
     env.run()
-    assert env.tt.tasks[tid]["title"] == "Gas!"
+    assert env.tt.tasks[tid]["title"] == "Water plants!"
     assert env.tt.tasks[tid]["repeatFlag"] == "RRULE:FREQ=MONTHLY;BYMONTHDAY=6,10"
     env.assert_quiet()
 

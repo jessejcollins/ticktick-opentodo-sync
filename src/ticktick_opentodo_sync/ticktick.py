@@ -85,6 +85,33 @@ class TickTick:
         body = [{"fromProjectId": from_project, "toProjectId": to_project, "taskId": task_id}]
         self.http.request("POST", "/open/v1/task/move", json=body)
 
+    # habits ---------------------------------------------------------------------------
+
+    def habits(self) -> list[JSON]:
+        return _list(self.http.request("GET", "/open/v1/habit"))
+
+    def habit_sections(self) -> list[JSON]:
+        return _list(self.http.request("GET", "/open/v1/habit/sections"))
+
+    def habit_checkins(self, habit_ids: list[str], from_stamp: int, to_stamp: int) -> list[JSON]:
+        """Check-in documents (``{habitId, checkins: [{stamp, status, ...}]}``)."""
+        if not habit_ids:
+            return []
+        params = {"habitIds": ",".join(habit_ids), "from": str(from_stamp), "to": str(to_stamp)}
+        return _list(self.http.request("GET", "/open/v1/habit/checkins", params=params))
+
+    def create_habit(self, body: JSON) -> JSON:
+        refuse_ciphertext(body)
+        return _obj(self.http.request("POST", "/open/v1/habit", json=body))
+
+    def update_habit(self, habit_id: str, body: JSON) -> JSON:
+        refuse_ciphertext(body)
+        return _obj(self.http.request("POST", f"/open/v1/habit/{habit_id}", json=body))
+
+    def checkin(self, habit_id: str, body: JSON) -> JSON:
+        """Create or update the check-in of ``body["stamp"]`` (YYYYMMDD)."""
+        return _obj(self.http.request("POST", f"/open/v1/habit/{habit_id}/checkin", json=body))
+
     def create_project(self, name: str) -> JSON:
         body = {"name": name, "viewMode": "list", "kind": "TASK"}
         refuse_ciphertext(body)

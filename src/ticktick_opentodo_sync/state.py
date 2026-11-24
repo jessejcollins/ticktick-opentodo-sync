@@ -15,9 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from .engine import Pair
+from .habits import HabitDef, HabitPair
 from .models import Task
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 TASKS = "pairs"
 ITEMS = "item_pairs"
@@ -41,6 +42,19 @@ CREATE TABLE IF NOT EXISTS pairs (
     tt_project TEXT NOT NULL,
     base       TEXT,
     updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS habit_pairs (
+    tt_id      TEXT PRIMARY KEY,
+    ot_id      TEXT NOT NULL UNIQUE,
+    tt_hash    TEXT NOT NULL,
+    ot_hash    TEXT NOT NULL,
+    base       TEXT,
+    updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS habit_days (
+    tt_id TEXT NOT NULL,
+    day   TEXT NOT NULL,
+    PRIMARY KEY (tt_id, day)
 );
 CREATE TABLE IF NOT EXISTS item_pairs (
     tt_id      TEXT PRIMARY KEY,
@@ -206,6 +220,61 @@ class State:
             "DELETE FROM item_pairs WHERE tt_project NOT IN (SELECT tt_id FROM pairs)"
         )
         return cur.rowcount
+
+
+# habits (module level so State stays one class of short methods) ---------------------------
+
+
+def habit_pairs(state: State) -> list[HabitPair]:
+    return [
+        HabitPair(
+            tt_id=r["tt_id"],
+            ot_id=r["ot_id"],
+            tt_hash=r["tt_hash"],
+            ot_hash=r["ot_hash"],
+            base=HabitDef.from_json(json.loads(r["base"])) if r["base"] else None,
+        )
+        for r in state.db.execute("SELECT * FROM habit_pairs")
+    ]
+
+
+def put_habit_pair(state: State, pair: HabitPair) -> None:
+    with state.tx():
+        state.db.execute(
+            "DELETE FROM habit_pairs WHERE ot_id = ? AND tt_id != ?", (pair.ot_id, pair.tt_id)
+        )
+        state.db.execute(
+            "INSERT OR REPLACE INTO habit_pairs "
+            "(tt_id, ot_id, tt_hash, ot_hash, base, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                pair.tt_id,
+                pair.ot_id,
+                pair.tt_hash,
+                pair.ot_hash,
+                None if pair.base is None else json.dumps(pair.base.to_json(), sort_keys=True),
+                int(time.time()),
+            ),
+        )
+
+
+def habit_days(state: State) -> set[tuple[str, str]]:
+    """(TickTick habit id, day) checked in on both sides at the last sync."""
+    return {(r["tt_id"], r["day"]) for r in state.db.execute("SELECT tt_id, day FROM habit_days")}
+
+
+def set_habit_day(state: State, tt_id: str, day: str, done: bool) -> None:
+    if done:
+        state.db.execute(
+            "INSERT OR IGNORE INTO habit_days (tt_id, day) VALUES (?, ?)", (tt_id, day)
+        )
+    else:
+        state.db.execute("DELETE FROM habit_days WHERE tt_id = ? AND day = ?", (tt_id, day))
+
+
+def prune_habit_days(state: State, before: str) -> None:
+    """Forget days that left the sync window (only when there are any: SD card)."""
+    if state.db.execute("SELECT 1 FROM habit_days WHERE day < ? LIMIT 1", (before,)).fetchone():
+        state.db.execute("DELETE FROM habit_days WHERE day < ?", (before,))
 
 
 def _table(name: str) -> str:

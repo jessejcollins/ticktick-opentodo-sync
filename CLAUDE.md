@@ -44,10 +44,10 @@ TickTick is primary. For each task pair, keep a record of what each side looked 
 
 ### Fields (v1)
 
-Sync: title, notes/description, due date (+ time and time zone), priority (map TickTick's 0/1/3/5 onto OpenTodo's scale and document the mapping), tags, completed status, list/project, and (phase 2, 2026-11-22) recurrence rules, subtasks and checklist items, and (phase 3, 2026-11-22) reminders.
+Sync: title, notes/description, due date (+ time and time zone), priority (map TickTick's 0/1/3/5 onto OpenTodo's scale and document the mapping), tags, completed status, list/project, and (phase 2, 2026-11-22) recurrence rules, subtasks and checklist items, and (phase 3, 2026-11-22) reminders, and (phase 4, 2026-11-24) habits.
 
 Leave out (sync these later if wanted):
-- Attachments, comments, focus/pomodoro data, habits.
+- Comments, focus/pomodoro data. (Attachments and Filters can't be synced: see the decisions log.)
 
 ## API facts
 
@@ -73,6 +73,8 @@ ticktick-opentodo-sync/
     mapping.py             # field mapping (priority, dates, tags) + project reconciliation
     state.py               # SQLite: id pairs, per-side hashes, project map, meta
     engine.py              # pure diff + sync rules above
+    habits.py              # pure habit mapping + planning (definitions, daily check-ins)
+    habit_sync.py          # habit orchestration, run after the task pass
     sync.py                # orchestration: fetch, plan, guard, apply, record
   tests/                   # pytest; mock HTTP (respx); engine tests are pure
   docs/api-notes.md
@@ -126,6 +128,12 @@ Answers to questions asked during the build (2026-11-21). Treat as settled.
   - TickTick `reminders[]` `TRIGGER:` durations ↔ OpenTodo `relative` reminders (`/api/v1/reminders`, separate records the client reconciles). TickTick's own spelling is kept while it means the same (`-PT0S`); non-trigger entries are never dropped.
   - OpenTodo `absolute`, `deadline` and location reminders have no TickTick equivalent: left alone, never synced or deleted.
   - No reminder hash migration was needed: tasks without reminders keep their old hashes. The first dry run (2026-11-22) planned only the expected reminder pushes.
+- **Habits (phase 4, 2026-11-24).** TickTick habits ↔ OpenTodo habits (repeating tasks with `habit: true`), both ways. `habits.py` is pure like `engine.py`; `habit_sync.py` runs after the task pass on the tasks it fetched.
+  - Definitions sync like tasks (`habit_pairs`, per-side hashes, TickTick wins): name ↔ title, `repeatRule` ↔ `recurrence` (via `recurrence.py`), section `_morning`/`_afternoon`/`_night` ↔ day part morning/afternoon/evening, reminder times `HH:MM` ↔ relative reminders counted from 09:00.
+  - Check-ins sync both ways over a rolling 30-day window, which was also the first-run backfill (the maintainer's choice). One boolean per day: TickTick status 2 ↔ an OpenTodo done or tiny record. `habit_days` remembers the days done on both sides, so exactly one side can have changed. OpenTodo's "skipped" has no TickTick equivalent and stays there.
+  - OpenTodo takes a check-in only from a habit's first day (its due date or earliest record) to today, and only completes the current day. So a new OpenTodo habit starts on its first check-in day in the window, and before logging a later day the sync moves the habit's due date to that day (the days in between read as missed, as they were).
+  - New TickTick habits go to an OpenTodo project "Habits" (id in meta `ot_habits_project`), which the task sync never turns into a TickTick list. New OpenTodo habits are created in TickTick as yes/no habits.
+  - Not synced: archiving/graduating and deleting (TickTick's API can't delete a habit), amount habits and targets ("3 times a week"). They're left alone with a warning. TickTick clearing more check-ins than the bulk limit stops the habit pass.
 - **Not possible with TickTick's Open API (checked 2026-11-24), so skipped:**
   - **Filters ↔ Views:** the Open API has no saved-filter endpoints (only an ad-hoc `/task/filter` query). OpenTodo Views (`/api/v1/views`) would be easy; TickTick is the blocker.
   - **Attachments:** TickTick keeps them as `![file](<id>/<name>)` references in the notes, which already sync as text. The Open API has no attachment routes, and the web app's `/api/v1/attachment/...` answers 401 to the API token. It needs a username/password session, which goes against the token-only decision.

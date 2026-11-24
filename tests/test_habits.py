@@ -27,6 +27,7 @@ from ticktick_opentodo_sync.habits import (
     tt_done_days,
     window,
 )
+from ticktick_opentodo_sync.opentodo import PLACEHOLDER
 from ticktick_opentodo_sync.state import State
 from ticktick_opentodo_sync.sync import PassResult, Syncer
 
@@ -186,6 +187,7 @@ class Env:
     def __init__(self, tmp: Path) -> None:
         self.tt = FakeTickTick()
         self.ot = FakeOpenTodo()
+        self.ot.today = "2026-11-24"
         self.state = State(tmp / "state.db")
 
     def run(self, *, dry_run: bool = False) -> PassResult:
@@ -270,7 +272,8 @@ def test_missed_days_then_a_check_in_moves_the_opentodo_habit(env: Env) -> None:
     env.tt.checkins[(hid, 20261110)] = 2
     env.run()
     habit = env.ot_habit("Walk")
-    assert habit["due"] == {"date": "2026-11-11"}  # nothing since: overdue in OpenTodo
+    # Logging 11-10 jumps OpenTodo past today; the sync puts it back on today, still open.
+    assert habit["due"] == {"date": "2026-11-24"}
     env.tt.checkins[(hid, 20261123)] = 2
     env.run()
     assert env.ot_days(habit) == ["2026-11-10", "2026-11-23"]
@@ -335,3 +338,29 @@ def test_dry_run_writes_nothing(env: Env) -> None:
     res = env.run(dry_run=True)
     assert res.habits_ot.created == 1 and res.habits_ot.completed == 1, res.summary()
     assert not env.ot.writes and not env.tt.writes
+
+
+def test_placeholder_name_is_repaired_never_copied(env: Env) -> None:
+    """2026-11-24: an open browser saved the create placeholder over a habit."""
+    hid = env.tt.add_habit("Drink water")
+    env.run()
+    env.ot_habit("Drink water")["title"] = PLACEHOLDER
+    res = env.run()
+    assert res.habits_ot.updated == 1 and not res.habits_tt.updated, res.summary()
+    assert env.ot_habit("Drink water")
+    assert env.tt.habits_[hid]["name"] == "Drink water"
+    assert not [w for w in env.tt.writes if w[0] == "update_habit"]
+    env.quiet()
+
+
+def test_skipped_today_is_left_alone(env: Env) -> None:
+    hid = env.tt.add_habit("Run")
+    env.tt.checkins[(hid, 20261120)] = 2
+    env.run()
+    habit = env.ot_habit("Run")
+    assert habit["due"] == {"date": "2026-11-24"}
+    env.ot.log_habit(habit["id"], "2026-11-24", "skipped", None)
+    assert habit["due"] == {"date": "2026-11-25"}
+    env.quiet()  # skipped stays in OpenTodo, and the habit isn't pulled back to today
+    assert habit["due"] == {"date": "2026-11-25"}
+    assert env.tt_days(hid) == [20261120]

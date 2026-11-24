@@ -188,6 +188,8 @@ class FakeOpenTodo:
         self.writes: list[tuple[str, Any]] = []
         self.idempotency: dict[str, str] = {}
         self.refuse_occurrences = False
+        self.today: str | None = None
+        """Set by habit tests: OpenTodo's idea of today, for log_habit."""
 
     def add_project(self, name: str, *, archived: bool = False) -> str:
         pid = _id("otp")
@@ -291,9 +293,20 @@ class FakeOpenTodo:
             raise ApiError("OpenTodo", "POST", "log", 400, "not a scheduled day")
         else:
             rid = self.add_task(habit["title"], habit["project_id"])
-            self.tasks_[rid] |= {"series_id": habit_id, "occurrence_date": day, "completed_at": 1}
+            self.tasks_[rid] |= {
+                "series_id": habit_id,
+                "occurrence_date": day,
+                "completed_at": 1,
+                "skipped": state == "skipped",
+            }
             if day == due:
+                # OpenTodo moves to the next day that isn't past: an overdue habit jumps past
+                # today (seen 2026-11-24), whatever day was completed.
                 nxt = (datetime.fromisoformat(day) + timedelta(days=1)).date().isoformat()
+                if self.today and nxt <= self.today:
+                    nxt = (
+                        (datetime.fromisoformat(self.today) + timedelta(days=1)).date().isoformat()
+                    )
                 habit["due"] = {"date": nxt}
         return {"habit": {"id": habit_id, "current_date": habit["due"]["date"]}}
 

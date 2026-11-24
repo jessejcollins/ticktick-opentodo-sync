@@ -1,0 +1,69 @@
+# Tag and release whenever a version bump lands on main.
+#
+# Bump `version` in pyproject.toml and `__version__` in src/ticktick_opentodo_sync/__init__.py
+# in a pull request; merging it creates the tag vX.Y.Z and a GitHub release whose notes list
+# the pull requests merged since the previous release. Merges without a bump do nothing.
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Read the version
+        id: version
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import re, sys, tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          init = Path("src/ticktick_opentodo_sync/__init__.py").read_text()
+          m = re.search(r'^__version__ = "([^"]+)"', init, re.M)
+          if not m or m.group(1) != version:
+              sys.exit(f"version mismatch: pyproject.toml {version!r}, __init__.py {m and m.group(1)!r}")
+          print(f"version={version}")
+          print(f"tag=v{version}")
+          PY
+
+      - name: Skip if already released
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            echo "$TAG already exists; nothing to release."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tag and release
+        if: steps.check.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION" \
+            --generate-notes

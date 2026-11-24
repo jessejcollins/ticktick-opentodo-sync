@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ticktick-opentodo-sync"
-version = "0.0.1"
+version = "0.0.2"
 description = "Two-way task sync between TickTick (primary) and OpenTodo"
 readme = "README.md"
 license = "MIT"

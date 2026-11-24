@@ -317,7 +317,7 @@ def test_browser_saving_the_placeholder_is_repaired(
     """2026-11-22: an open browser saved its sealed copy of the create placeholder over
     the content PATCHed a moment earlier. The next pass rewrites OpenTodo from TickTick."""
     tt = FakeTickTick()
-    tt.add_task("CLR shower tub, stop", content="the good one")
+    tt.add_task("Clean the gutters", content="the good one")
     state = State(tmp_path / "s.db")
     syncer = Syncer(tt, client(passphrase=PASSPHRASE), state)
     assert syncer.run(dry_run=False).ot.created == 1
@@ -340,7 +340,7 @@ def test_browser_saving_the_placeholder_is_repaired(
     assert len(tt.writes) == tt_writes
     plain = {t["id"]: t for t in server.plain("tasks")}
     assert (plain[oid]["title"], plain[oid]["description"]) == (
-        "CLR shower tub, stop",
+        "Clean the gutters",
         "the good one",
     )
     assert e2ee.is_ciphertext(server.data["tasks"][oid]["title"])

@@ -28,7 +28,7 @@ services:
     stop_grace_period: 60s
     # Docker can't use a 127.0.0.1 resolver from the host. If Pi-hole is the host's DNS and
     # you want ticktick-opentodo-sync to resolve through it, point at the Pi's LAN address:
-    # dns: ["192.168.1.2"]
+    # dns: ["192.168.1.10"]   # example: the Pi's LAN address
     logging:
       driver: json-file
       options:

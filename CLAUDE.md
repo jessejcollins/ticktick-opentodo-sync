@@ -126,6 +126,9 @@ Answers to questions asked during the build (2026-11-21). Treat as settled.
   - TickTick `reminders[]` `TRIGGER:` durations ↔ OpenTodo `relative` reminders (`/api/v1/reminders`, separate records the client reconciles). TickTick's own spelling is kept while it means the same (`-PT0S`); non-trigger entries are never dropped.
   - OpenTodo `absolute`, `deadline` and location reminders have no TickTick equivalent: left alone, never synced or deleted.
   - No reminder hash migration was needed: tasks without reminders keep their old hashes. The first dry run (2026-11-22) planned 162 reminder pushes to OpenTodo and 2 OpenTodo-only reminders to TickTick, nothing else.
+- **Not possible with TickTick's Open API (checked 2026-11-24), so skipped:**
+  - **Filters ↔ Views:** the Open API has no saved-filter endpoints (only an ad-hoc `/task/filter` query). OpenTodo Views (`/api/v1/views`) would be easy; TickTick is the blocker.
+  - **Attachments:** TickTick keeps them as `![file](<id>/<name>)` references in the notes, which already sync as text. The Open API has no attachment routes, and the web app's `/api/v1/attachment/...` answers 401 to the API token. It needs a username/password session, which goes against the token-only decision.
 - **Closed TickTick lists / archived OpenTodo projects** are out of scope. Their tasks are left alone.
 - **Recurrence (phase 2, 2026-11-22).** Rules sync both ways (`recurrence.py`, a port of OpenTodo's own RRULE converter). Report first with `--recurrence-report` (read-only).
   - A TickTick rule OpenTodo can't express exactly is kept in TickTick only (`ticktick-only:` in state) and never cleared from the OpenTodo side; that task syncs its due date only. If TickTick already holds the same rule in a different spelling, its spelling is kept.

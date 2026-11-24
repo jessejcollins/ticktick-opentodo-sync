@@ -42,7 +42,7 @@ Some things can't be synced because TickTick's Open API offers no way to read th
 
 - A TickTick account (an API token is available under Settings → Account).
 - An OpenTodo server you can reach over HTTPS, with an API token.
-- A Linux host with Docker Engine and the Compose plugin. Built and tested on a Raspberry Pi 4 (arm64) and on amd64.
+- Either a Linux host with Docker Engine and the Compose plugin (built and tested on a Raspberry Pi 4, arm64, and on amd64), or Python 3.11 or newer to [run it without Docker](#running-without-docker).
 
 ## Setup
 
@@ -97,6 +97,60 @@ OpenTodo should start **empty**: the sync seeds it from TickTick. If OpenTodo al
    ```sh
    docker compose up -d
    ```
+
+## Running without Docker
+
+If you'd rather not run Docker, the sync is an ordinary Python package with two dependencies (`httpx` and `cryptography`). It needs Python 3.11 or newer.
+
+```sh
+git clone https://github.com/jessejcollins/ticktick-opentodo-sync.git
+cd ticktick-opentodo-sync
+python3 -m venv .venv
+.venv/bin/pip install .
+cp .env.example .env && chmod 600 .env
+$EDITOR .env
+```
+
+Run commands from this directory: the sync reads `./.env` (or the file given with `--env-file`) and keeps its state in `./state/`. Set `TICKTICK_OPENTODO_SYNC_STATE_DIR` in `.env` to keep state somewhere else. The [first run](#first-run) steps are the same, minus the `docker compose run --rm` prefix:
+
+```sh
+.venv/bin/ticktick-opentodo-sync --dry-run
+.venv/bin/ticktick-opentodo-sync --apply
+.venv/bin/ticktick-opentodo-sync --status
+```
+
+To keep it running, pick one:
+
+- **cron:** run one pass every 5 minutes. With `TICKTICK_OPENTODO_SYNC_DRY_RUN=false` in `.env`, no flag is needed. Overlapping runs are safe: a run that finds another holding the lock waits, then exits with code 3.
+
+  ```cron
+  */5 * * * * cd /path/to/ticktick-opentodo-sync && .venv/bin/ticktick-opentodo-sync >> sync.log 2>&1
+  ```
+
+- **systemd:** let the sync loop on its own (`--loop`, one pass every `TICKTICK_OPENTODO_SYNC_INTERVAL` seconds) as a service. For example, `/etc/systemd/system/ticktick-opentodo-sync.service`:
+
+  ```ini
+  [Unit]
+  Description=TickTick <-> OpenTodo sync
+  Wants=network-online.target
+  After=network-online.target
+
+  [Service]
+  User=youruser
+  WorkingDirectory=/path/to/ticktick-opentodo-sync
+  ExecStart=/path/to/ticktick-opentodo-sync/.venv/bin/ticktick-opentodo-sync --loop
+  # State goes to /var/lib/ticktick-opentodo-sync (the sync picks up STATE_DIRECTORY).
+  StateDirectory=ticktick-opentodo-sync
+  Restart=on-failure
+  RestartSec=60
+
+  [Install]
+  WantedBy=multi-user.target
+  ```
+
+  Then `sudo systemctl enable --now ticktick-opentodo-sync` and follow it with `journalctl -u ticktick-opentodo-sync -f`.
+
+Docker adds the resource limits and lockdown described in [Running next to Pi-hole](#running-next-to-pi-hole) and the `(healthy)`/`(unhealthy)` status. Without Docker, keep an eye on the log and exit codes instead. To update, `git pull` and run `.venv/bin/pip install .` again.
 
 ## Day to day
 
@@ -216,7 +270,7 @@ docker build --target dev -t ticktick-opentodo-sync:dev .
 docker run --rm -v "$PWD":/w -w /w -e PYTHONPATH=/w/src ticktick-opentodo-sync:dev pytest -q
 ```
 
-Outside Docker (Python 3.11 or newer): `pip install -e '.[dev]'`, then `ticktick-opentodo-sync --dry-run`. It reads `./.env` and keeps state in `./state/`.
+Outside Docker (Python 3.11 or newer): `pip install -e '.[dev]'` in a virtualenv, then `pytest`, `ruff check src tests` and `mypy`. See [Running without Docker](#running-without-docker) for running the sync itself.
 
 ### Code map
 

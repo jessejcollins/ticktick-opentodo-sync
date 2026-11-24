@@ -14,7 +14,7 @@ The same tasks show up in both apps, so someone can keep using TickTick day to d
 - **Dev:** lint, type-check and test inside Docker: `docker build --target test .` (no local Python needed).
 - **TickTick:** cloud, accessed through the TickTick Open API with a **personal API token** (TickTick → Settings → Account → API Token), not OAuth2. Developer docs: <https://developer.ticktick.com> (the readable source is <https://developer.ticktick.com/docs/openapi.md>).
 - **OpenTodo:** self-hosted, reached over HTTPS through its REST API with an API token. Docs: <https://open-todo.app/docs>. End-to-end encryption may be on.
-- **Scheduling:** an in-container loop (`ticktick-opentodo-sync --loop`) under `restart: unless-stopped`. No systemd units, no cron.
+- **Scheduling:** an in-container loop (`ticktick-opentodo-sync --loop`) under `restart: unless-stopped`. Docker Compose is the supported deployment; the README also documents running from a virtualenv under cron or systemd (examples only: the repo ships no units).
 
 ## Hard constraints
 

@@ -134,6 +134,15 @@ Answers to questions asked during the build (2026-11-21). Treat as settled.
   - Completing in TickTick (2026-11-23): TickTick moves the task on under the same id and files a completed copy with the old due date. When a repeating task's TickTick date moves past the last-synced one, the sync looks for that copy (`POST /open/v1/task/completed`, same list + title + old date) and, if found, completes OpenTodo's occurrence for that date (`POST /api/v1/tasks/{id}/occurrences/{date}/complete`, with TickTick's completion time), then sets TickTick's next date. No copy = a reschedule: OpenTodo just moves. "After completion" rules and refusals (400) just move too. Past completions can't be backfilled: OpenTodo refuses dates before the current occurrence.
   - Jesse's 5 untranslatable rules were reworked in TickTick on 2026-11-22: water filter and gas split into two tasks each, alarm moved to Dec 1, AMEX YEAR no longer repeats, AMEX QUARTER due on the quarter's 1st and left overdue until done (don't push it back).
 
+## Git workflow
+
+Decided 2026-11-24: every change goes through a pull request.
+
+- **Never commit to `main` or fast-forward it.** Start each feature, fix or doc change on a new branch from an up-to-date `main`: `feat/<name>`, `fix/<name>` or `docs/<name>`.
+- **Open a PR with `gh pr create`** once the branch is pushed. The description covers what changed, why, and how it was tested (`docker build --target test .`, plus any dry run against real data). Keep pushing to the same branch for follow-ups.
+- **Don't merge a PR unless asked.** I review and merge.
+- **Releases:** after merging, bump `version` in `pyproject.toml` and `__version__` in `src/ticktick_opentodo_sync/__init__.py` in their own PR, then tag `vX.Y.Z` on `main` and run `gh release create vX.Y.Z --verify-tag`. `v0.0.1` was the first release.
+
 ## Logging and ops
 
 - Log to stdout (`docker compose logs ticktick-opentodo-sync`). One summary line per pass: created / updated / completed / deleted / conflicts per side.

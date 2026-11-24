@@ -341,14 +341,14 @@ def test_dry_run_writes_nothing(env: Env) -> None:
 
 
 def test_placeholder_name_is_repaired_never_copied(env: Env) -> None:
-    """2026-11-24: an open browser saved the create placeholder over 'Eat Fruits'."""
-    hid = env.tt.add_habit("Eat Fruits")
+    """2026-11-24: an open browser saved the create placeholder over a habit."""
+    hid = env.tt.add_habit("Drink water")
     env.run()
-    env.ot_habit("Eat Fruits")["title"] = PLACEHOLDER
+    env.ot_habit("Drink water")["title"] = PLACEHOLDER
     res = env.run()
     assert res.habits_ot.updated == 1 and not res.habits_tt.updated, res.summary()
-    assert env.ot_habit("Eat Fruits")
-    assert env.tt.habits_[hid]["name"] == "Eat Fruits"
+    assert env.ot_habit("Drink water")
+    assert env.tt.habits_[hid]["name"] == "Drink water"
     assert not [w for w in env.tt.writes if w[0] == "update_habit"]
     env.quiet()
 

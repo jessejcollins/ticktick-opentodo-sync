@@ -71,15 +71,15 @@ Not documented. ticktick-opentodo-sync spaces requests (`TICKTICK_OPENTODO_SYNC_
 
 ### Recurrence
 
-Completing a repeating task through the API (`.../complete`) moves it to its next date under the same id and **unticks its checklist items** (verified 2026-11-22). `repeatFlag` is an RRULE string plus `repeatFrom`, returned as a string (`"0"` from due date, `"1"` from completion date, `"2"` calendar; `"2"` behaves like `"0"` for the user's daily tasks). **Verified 2026-11-22:** an update with `repeatFlag: ""` removes the rule. Completing a recurring task keeps the same task ID and advances its dates. The completed instance is a **separate task with a new ID**, `status` 2, the old `dueDate` and `completedTime`, listed by `POST /open/v1/task/completed` (filters on completion time; verified 2026-11-23 for both app and API completions). The live task carries no link to it: match by list, title and old due date. Updates merge over the full task, so fields the sync doesn't model are preserved.
+Completing a repeating task through the API (`.../complete`) moves it to its next date under the same id and **unticks its checklist items** (verified 2026-11-22). `repeatFlag` is an RRULE string plus `repeatFrom`, returned as a string (`"0"` from due date, `"1"` from completion date, `"2"` calendar; `"2"` behaves like `"0"` in practice). **Verified 2026-11-22:** an update with `repeatFlag: ""` removes the rule. Completing a recurring task keeps the same task ID and advances its dates. The completed instance is a **separate task with a new ID**, `status` 2, the old `dueDate` and `completedTime`, listed by `POST /open/v1/task/completed` (filters on completion time; verified 2026-11-23 for both app and API completions). The live task carries no link to it: match by list, title and old due date. Updates merge over the full task, so fields the sync doesn't model are preserved.
 
 ### Reminders
 
-`reminders` is a list of iCalendar `TRIGGER:` durations from the due time (`TRIGGER:PT0S` at due time, `TRIGGER:-PT30M`, `TRIGGER:-P1D`). For an all-day task they count from **midnight** of the day (`TRIGGER:P0DT9H0M0S` is 09:00 on the day, `TRIGGER:-P0DT15H0M0S` 09:00 the day before); the apps write that long form. `TRIGGER:-PT0S` occurs too and means the same as `PT0S`. Seen 2026-11-22: 162 of 465 open tasks have reminders, all `PT0S` (timed) or `P0DT7H0M0S` (all-day).
+`reminders` is a list of iCalendar `TRIGGER:` durations from the due time (`TRIGGER:PT0S` at due time, `TRIGGER:-PT30M`, `TRIGGER:-P1D`). For an all-day task they count from **midnight** of the day (`TRIGGER:P0DT9H0M0S` is 09:00 on the day, `TRIGGER:-P0DT15H0M0S` 09:00 the day before); the apps write that long form. `TRIGGER:-PT0S` occurs too and means the same as `PT0S`.
 
 ### Habits
 
-`GET /open/v1/habit` (all habits; `status` 0 = in use), `GET /open/v1/habit/sections` (built-in `_morning`, `_afternoon`, `_night`), `POST /open/v1/habit` (create), `POST /open/v1/habit/{id}` (update; only the fields sent), no delete. `GET /open/v1/habit/checkins?habitIds=a,b&from=YYYYMMDD&to=YYYYMMDD` returns `[{habitId, checkins: [{stamp, status, value, goal, time, opTime}]}]`; `POST /open/v1/habit/{id}/checkin` `{stamp, status, value, goal, time, opTime}` creates or updates that day. Check-in `status`: 0 unmarked, 1 not completed, 2 completed (from the TickTick connector's tool schema). Seen 2026-11-24: 6 habits, all `type` `Boolean`, `goal` 1, rule `RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=SU,MO,TU,WE,TH,FR,SA`, reminders as `"HH:MM"` strings.
+`GET /open/v1/habit` (all habits; `status` 0 = in use), `GET /open/v1/habit/sections` (built-in `_morning`, `_afternoon`, `_night`), `POST /open/v1/habit` (create), `POST /open/v1/habit/{id}` (update; only the fields sent), no delete. `GET /open/v1/habit/checkins?habitIds=a,b&from=YYYYMMDD&to=YYYYMMDD` returns `[{habitId, checkins: [{stamp, status, value, goal, time, opTime}]}]`; `POST /open/v1/habit/{id}/checkin` `{stamp, status, value, goal, time, opTime}` creates or updates that day. Check-in `status`: 0 unmarked, 1 not completed, 2 completed (from the TickTick connector's tool schema). Typical habit: `type` `Boolean`, `goal` 1, rule `RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=SU,MO,TU,WE,TH,FR,SA`, reminders as `"HH:MM"` strings.
 
 ## OpenTodo REST API
 
@@ -106,7 +106,7 @@ Completing a repeating task through the API (`.../complete`) moves it to its nex
 | Projects | `GET/POST /api/v1/projects`, `GET/PATCH/DELETE /api/v1/projects/{id}` | create: `name, color, parent_id, icon, flow_mode` |
 | Labels | `GET/POST /api/v1/labels`, `.../{id}` | create `{name, color?}`; an existing label with the same name returns 200 |
 | History | `GET /api/v1/tasks/{id}/history` | change sets from the op log |
-| Webhooks | `/api/v1/webhooks` | `task.created/updated/completed/reopened/deleted`, HMAC-signed. Not used: the Pi isn't reachable from PikaPods |
+| Webhooks | `/api/v1/webhooks` | `task.created/updated/completed/reopened/deleted`, HMAC-signed. Not used: the sync usually runs where the OpenTodo server can't reach it |
 
 ### Task object (spec `components/schemas/Task`)
 

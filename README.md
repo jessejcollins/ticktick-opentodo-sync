@@ -6,6 +6,18 @@ TickTick is the primary side: when both apps change the same thing between passe
 
 > This is an unofficial tool. It isn't affiliated with or endorsed by TickTick or OpenTodo. It uses each app's public API with tokens you create.
 
+## Use at your own risk
+
+This tool writes to both of your task apps: it creates, changes, completes and deletes tasks, and a mistake is copied to the other side within minutes. It works well for its author, but your data, settings and edge cases will differ, and it comes with **no warranty** (see the [MIT license](LICENSE)). Before you trust it with tasks you care about:
+
+- **Back up both apps first.** Use TickTick's backup in the web app (Settings → Account → Backup) and OpenTodo's JSON export (`GET /api/v1/export`). Keep backups from before the first `--apply`.
+- **Start with a dry run** (the default) and read what it would do. Then do the first real runs by hand, and only then start the loop.
+- **Keep the bulk-delete guard on.** Don't raise `TICKTICK_OPENTODO_SYNC_MAX_DESTRUCTIVE` much above the default, and only use `--allow-bulk` after reading what it would apply.
+- **Remember TickTick wins conflicts.** An edit made in OpenTodo can be overwritten if the same task changed in TickTick before the next pass.
+- **If something looks wrong,** stop it at once (`docker compose stop`, or stop your cron job or service), then compare both apps. OpenTodo keeps each task's history (`GET /api/v1/tasks/{id}/history`) and a Trash, which helps with recovery.
+
+Bug reports with steps to reproduce are very welcome. Leave real task content out of them.
+
 ## What syncs
 
 Everything below syncs both ways.

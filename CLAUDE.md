@@ -44,10 +44,10 @@ TickTick is primary. For each task pair, keep a record of what each side looked 
 
 ### Fields (v1)
 
-Sync: title, notes/description, due date (+ time and time zone), priority (map TickTick's 0/1/3/5 onto OpenTodo's scale and document the mapping), tags, completed status, list/project, and (phase 2, 2026-11-22) recurrence rules, subtasks and checklist items, and (phase 3, 2026-11-22) reminders.
+Sync: title, notes/description, due date (+ time and time zone), priority (map TickTick's 0/1/3/5 onto OpenTodo's scale and document the mapping), tags, completed status, list/project, and (phase 2, 2026-11-22) recurrence rules, subtasks and checklist items, and (phase 3, 2026-11-22) reminders, and (phase 4, 2026-11-24) habits.
 
 Leave out (sync these later if wanted):
-- Attachments, comments, focus/pomodoro data, habits.
+- Comments, focus/pomodoro data. (Attachments and Filters can't be synced: see the decisions log.)
 
 ## API facts
 
@@ -73,6 +73,8 @@ ticktick-opentodo-sync/
     mapping.py             # field mapping (priority, dates, tags) + project reconciliation
     state.py               # SQLite: id pairs, per-side hashes, project map, meta
     engine.py              # pure diff + sync rules above
+    habits.py              # pure habit mapping + planning (definitions, daily check-ins)
+    habit_sync.py          # habit orchestration, run after the task pass
     sync.py                # orchestration: fetch, plan, guard, apply, record
   tests/                   # pytest; mock HTTP (respx); engine tests are pure
   docs/api-notes.md
@@ -126,6 +128,17 @@ Answers to questions asked during the build (2026-11-21). Treat as settled.
   - TickTick `reminders[]` `TRIGGER:` durations ↔ OpenTodo `relative` reminders (`/api/v1/reminders`, separate records the client reconciles). TickTick's own spelling is kept while it means the same (`-PT0S`); non-trigger entries are never dropped.
   - OpenTodo `absolute`, `deadline` and location reminders have no TickTick equivalent: left alone, never synced or deleted.
   - No reminder hash migration was needed: tasks without reminders keep their old hashes. The first dry run (2026-11-22) planned 162 reminder pushes to OpenTodo and 2 OpenTodo-only reminders to TickTick, nothing else.
+- **Habits (phase 4, 2026-11-24).** TickTick habits ↔ OpenTodo habits (repeating tasks with `habit: true`), both ways. `habits.py` is pure like `engine.py`; `habit_sync.py` runs after the task pass on the tasks it fetched.
+  - Definitions sync like tasks (`habit_pairs`, per-side hashes, TickTick wins): name ↔ title, `repeatRule` ↔ `recurrence` (via `recurrence.py`), section `_morning`/`_afternoon`/`_night` ↔ day part morning/afternoon/evening, reminder times `HH:MM` ↔ relative reminders counted from 09:00.
+  - Check-ins sync both ways over a rolling 30-day window, which was also the first-run backfill (Jesse's choice). One boolean per day: TickTick status 2 ↔ an OpenTodo done or tiny record. `habit_days` remembers the days done on both sides, so exactly one side can have changed. OpenTodo's "skipped" has no TickTick equivalent and stays there.
+  - OpenTodo takes a check-in only from a habit's first day (its due date or earliest record) to today, and only completes the current day. So a new OpenTodo habit starts on its first check-in day in the window, and before logging a later day the sync moves the habit's due date to that day (the days in between read as missed, as they were).
+  - Logging an overdue day completes OpenTodo's current occurrence, which jumps the habit past today (seen 2026-11-24: due 11-02 → 11-25). So after the day writes, a daily habit whose due is after today, with today neither done nor skipped, is moved back to today.
+  - The create-placeholder race (see E2EE above) hit a habit too on 2026-11-24 ("Eat Fruits"): a paired OpenTodo habit whose title is the placeholder is rewritten from TickTick, never copied.
+  - New TickTick habits go to an OpenTodo project "Habits" (Jesse's choice; id in meta `ot_habits_project`), which the task sync never turns into a TickTick list. New OpenTodo habits are created in TickTick as yes/no habits.
+  - Not synced: archiving/graduating and deleting (TickTick's API can't delete a habit), amount habits and targets ("3 times a week"). Jesse has none of these; they're left alone with a warning. TickTick clearing more check-ins than the bulk limit stops the habit pass.
+- **Not possible with TickTick's Open API (checked 2026-11-24), so skipped:**
+  - **Filters ↔ Views:** the Open API has no saved-filter endpoints (only an ad-hoc `/task/filter` query). OpenTodo Views (`/api/v1/views`) would be easy; TickTick is the blocker.
+  - **Attachments:** TickTick keeps them as `![file](<id>/<name>)` references in the notes, which already sync as text. The Open API has no attachment routes, and the web app's `/api/v1/attachment/...` answers 401 to the API token. It needs a username/password session, which goes against the token-only decision.
 - **Closed TickTick lists / archived OpenTodo projects** are out of scope. Their tasks are left alone.
 - **Recurrence (phase 2, 2026-11-22).** Rules sync both ways (`recurrence.py`, a port of OpenTodo's own RRULE converter). Report first with `--recurrence-report` (read-only).
   - A TickTick rule OpenTodo can't express exactly is kept in TickTick only (`ticktick-only:` in state) and never cleared from the OpenTodo side; that task syncs its due date only. If TickTick already holds the same rule in a different spelling, its spelling is kept.
@@ -133,6 +146,15 @@ Answers to questions asked during the build (2026-11-21). Treat as settled.
   - Completing a repeating task in OpenTodo (task moves on, plus a completed occurrence record with `series_id`) completes it once in TickTick and doesn't write OpenTodo that pass. TickTick then advances it, and its next date wins on the following pass. Skipping in OpenTodo just moves the TickTick date.
   - Completing in TickTick (2026-11-23): TickTick moves the task on under the same id and files a completed copy with the old due date. When a repeating task's TickTick date moves past the last-synced one, the sync looks for that copy (`POST /open/v1/task/completed`, same list + title + old date) and, if found, completes OpenTodo's occurrence for that date (`POST /api/v1/tasks/{id}/occurrences/{date}/complete`, with TickTick's completion time), then sets TickTick's next date. No copy = a reschedule: OpenTodo just moves. "After completion" rules and refusals (400) just move too. Past completions can't be backfilled: OpenTodo refuses dates before the current occurrence.
   - Jesse's 5 untranslatable rules were reworked in TickTick on 2026-11-22: water filter and gas split into two tasks each, alarm moved to Dec 1, AMEX YEAR no longer repeats, AMEX QUARTER due on the quarter's 1st and left overdue until done (don't push it back).
+
+## Git workflow
+
+Decided 2026-11-24: every change goes through a pull request.
+
+- **Never commit to `main` or fast-forward it.** Start each feature, fix or doc change on a new branch from an up-to-date `main`: `feat/<name>`, `fix/<name>` or `docs/<name>`.
+- **Open a PR with `gh pr create`** once the branch is pushed. The description covers what changed, why, and how it was tested (`docker build --target test .`, plus any dry run against real data). Keep pushing to the same branch for follow-ups.
+- **Don't merge a PR unless asked.** I review and merge.
+- **Releases:** after merging, bump `version` in `pyproject.toml` and `__version__` in `src/ticktick_opentodo_sync/__init__.py` in their own PR, then tag `vX.Y.Z` on `main` and run `gh release create vX.Y.Z --verify-tag`. `v0.0.1` was the first release.
 
 ## Logging and ops
 

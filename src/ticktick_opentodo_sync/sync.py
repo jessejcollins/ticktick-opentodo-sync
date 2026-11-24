@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from . import engine, recurrence
 from .engine import Action, Kind, Pair, Snapshot
+from .habit_sync import META_PROJECT, HabitSync
 from .http import ApiError
 from .mapping import (
     TT_DONE,
@@ -47,6 +48,14 @@ class TickTickApi(Protocol):
     def delete_task(self, project_id: str, task_id: str) -> None: ...
     def move_task(self, task_id: str, from_project: str, to_project: str) -> None: ...
     def create_project(self, name: str) -> JSON: ...
+    def habits(self) -> list[JSON]: ...
+    def habit_sections(self) -> list[JSON]: ...
+    def habit_checkins(
+        self, habit_ids: list[str], from_stamp: int, to_stamp: int
+    ) -> list[JSON]: ...
+    def create_habit(self, body: JSON) -> JSON: ...
+    def update_habit(self, habit_id: str, body: JSON) -> JSON: ...
+    def checkin(self, habit_id: str, body: JSON) -> JSON: ...
 
 
 class OpenTodoApi(Protocol):
@@ -60,6 +69,7 @@ class OpenTodoApi(Protocol):
     def update_task(self, task_id: str, body: JSON) -> JSON: ...
     def delete_task(self, task_id: str) -> None: ...
     def complete_occurrence(self, task_id: str, date: str, completed_at: int | None) -> JSON: ...
+    def log_habit(self, habit_id: str, day: str, state: str, timezone: str | None) -> JSON: ...
 
 
 @dataclass
@@ -84,6 +94,9 @@ class PassResult:
     tt_items: SideCounts = field(default_factory=SideCounts)
     ot_items: SideCounts = field(default_factory=SideCounts)
     """Checklist items (TickTick) / their subtasks (OpenTodo)."""
+    habits_tt: SideCounts = field(default_factory=SideCounts)
+    habits_ot: SideCounts = field(default_factory=SideCounts)
+    """Habits: created/updated definitions, check-ins added (completed) and cleared (deleted)."""
     conflicts: int = 0
     errors: int = 0
     blocked: str | None = None
@@ -93,7 +106,7 @@ class PassResult:
 
     @property
     def changed(self) -> bool:
-        sides = (self.tt, self.ot, self.tt_items, self.ot_items)
+        sides = (self.tt, self.ot, self.tt_items, self.ot_items, self.habits_tt, self.habits_ot)
         return any(any(asdict(c).values()) for c in sides)
 
     @property
@@ -105,6 +118,7 @@ class PassResult:
         line = (
             f"{prefix}TickTick: {self.tt} | OpenTodo: {self.ot} | "
             f"items TickTick: {self.tt_items} | items OpenTodo: {self.ot_items} | "
+            f"habits TickTick: {self.habits_tt} | habits OpenTodo: {self.habits_ot} | "
             f"conflicts={self.conflicts} errors={self.errors}"
         )
         if self.blocked:
@@ -135,6 +149,11 @@ class World:
     tt_items: Snapshot = field(default_factory=Snapshot)
     ot_items: Snapshot = field(default_factory=Snapshot)
     tt_item_raw: dict[str, JSON] = field(default_factory=dict)
+    ot_habits: dict[str, JSON] = field(default_factory=dict)
+    """Open OpenTodo habits (the habit task itself, not its day records)."""
+    ot_records: list[JSON] = field(default_factory=list)
+    """Every live OpenTodo occurrence record (``series_id`` set)."""
+    ot_project_ids: set[str] = field(default_factory=set)
 
 
 class SyncRefusedError(Exception):
@@ -174,9 +193,14 @@ class Syncer:
             if p.get("id") and str(p.get("kind") or "TASK").upper() != "NOTE"
         }
         ot_projects: dict[str, ProjectInfo] = {}
+        ot_project_ids: set[str] = set()
+        habits_project = self.state.get_meta(META_PROJECT)
         for p in self.ot.projects():
             if not p.get("id") or p.get("deleted_at") is not None:
                 continue
+            ot_project_ids.add(str(p["id"]))
+            if str(p["id"]) == habits_project:
+                continue  # the habit sync's own project: never a TickTick list
             if _unreadable(p, "name"):
                 # Kept (so a stored pair survives) but inactive: its tasks stay out of scope
                 # and its name is never matched or copied.
@@ -211,6 +235,7 @@ class Syncer:
             pairs={p.tt_id: p for p in self.state.pairs()},
             project_names=names,
             item_pairs={p.tt_id: p for p in self.state.pairs(ITEMS)},
+            ot_project_ids=ot_project_ids,
         )
         for pair in world.pairs.values():
             mapper.link_task(pair.tt_id, pair.ot_id)
@@ -329,6 +354,10 @@ class Syncer:
                     w.ot.completed_occurrences.setdefault(str(raw["series_id"]), set()).add(
                         str(occ)
                     )
+            if raw.get("series_id"):
+                w.ot_records.append(raw)
+            elif raw.get("habit") and raw.get("completed_at") is None and not raw.get(UNREADABLE):
+                w.ot_habits[oid] = raw
             if raw.get("series_id") or raw.get("habit"):
                 w.ot.out_of_scope.add(oid)
                 continue
@@ -497,6 +526,27 @@ class Syncer:
         for a in actions:
             self._apply(a, w, res, dry_run=dry_run)
         self._apply_items(item_actions, w, res, dry_run=dry_run)
+        try:
+            HabitSync(
+                self.tt,
+                self.ot,
+                self.state,
+                timezone=w.mapper.default_tz,
+                now_ms=self.now_ms,
+                run_id=self.run_id,
+                max_destructive=self.max_destructive,
+            ).run(
+                w.ot_habits,
+                w.ot_records,
+                w.ot_project_ids,
+                res,
+                dry_run=dry_run,
+                allow_bulk=allow_bulk,
+            )
+        except Exception as exc:
+            res.errors += 1
+            log.error("habit sync failed: %s", exc)  # noqa: TRY400
+            log.debug("traceback", exc_info=True)
 
         if not dry_run:
             if dropped := self.state.drop_orphan_items():

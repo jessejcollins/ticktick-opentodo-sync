@@ -77,6 +77,10 @@ Completing a repeating task through the API (`.../complete`) moves it to its nex
 
 `reminders` is a list of iCalendar `TRIGGER:` durations from the due time (`TRIGGER:PT0S` at due time, `TRIGGER:-PT30M`, `TRIGGER:-P1D`). For an all-day task they count from **midnight** of the day (`TRIGGER:P0DT9H0M0S` is 09:00 on the day, `TRIGGER:-P0DT15H0M0S` 09:00 the day before); the apps write that long form. `TRIGGER:-PT0S` occurs too and means the same as `PT0S`. Seen 2026-11-22: 162 of 465 open tasks have reminders, all `PT0S` (timed) or `P0DT7H0M0S` (all-day).
 
+### Habits
+
+`GET /open/v1/habit` (all habits; `status` 0 = in use), `GET /open/v1/habit/sections` (built-in `_morning`, `_afternoon`, `_night`), `POST /open/v1/habit` (create), `POST /open/v1/habit/{id}` (update; only the fields sent), no delete. `GET /open/v1/habit/checkins?habitIds=a,b&from=YYYYMMDD&to=YYYYMMDD` returns `[{habitId, checkins: [{stamp, status, value, goal, time, opTime}]}]`; `POST /open/v1/habit/{id}/checkin` `{stamp, status, value, goal, time, opTime}` creates or updates that day. Check-in `status`: 0 unmarked, 1 not completed, 2 completed (from the TickTick connector's tool schema). Seen 2026-11-24: 6 habits, all `type` `Boolean`, `goal` 1, rule `RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=SU,MO,TU,WE,TH,FR,SA`, reminders as `"HH:MM"` strings.
+
 ## OpenTodo REST API
 
 ### Auth and conventions
@@ -133,6 +137,10 @@ Separate records, not task fields: `GET /api/v1/reminders` → `{"reminders": [{
 ### Recurring occurrences
 
 `POST /api/v1/tasks/{id}/occurrences/{date}/complete` (`{completed_at?}`): on the current occurrence, writes a completed record (`series_id`, `occurrence_date`) and moves the series to its next date. Refused (`400 not_an_occurrence`) for a date before the current occurrence or a rule that repeats after completion. Also `…/skip` and `PATCH …/occurrences/{date}`. On an encrypted account the record carries no title until an unlocked device fills it in.
+
+### Habits
+
+A habit is a repeating task with `habit: true`; each day is an occurrence record (`series_id`, `occurrence_date`, `completed_at`, `skipped`, `tiny`). `POST /api/v1/habits/{id}/log` `{state: done|tiny|skipped|clear, date, timezone}`: the current day (its due date, or today while overdue) completes and moves the habit on; an earlier scheduled day gets its own record; `clear` removes a record. Refused (400) for a future day or a day outside "the habit's first day (due date or earliest record) to today" (OpenTodo `internal/habits/view.go` `PlanLog`). A habit's history therefore can't reach back before it existed unless it is created with an earlier due date. Habit titles in `/api/v1/habits` read `[encrypted]` on an encrypted account; the sync reads habits from `/api/v1/tasks` instead.
 
 ### Project object
 

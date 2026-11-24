@@ -63,6 +63,7 @@ ticktick-opentodo-sync/
   CLAUDE.md                # this file (CLAUDE.local.md: personal, gitignored)
   README.md                # what it does, setup, operations
   LICENSE                  # MIT
+  .github/workflows/release.yml  # tag + GitHub release when a version bump lands on main
   Dockerfile               # stages: build, dev, test (ruff+mypy+pytest), runtime
   compose.yaml
   pyproject.toml
@@ -152,7 +153,8 @@ Every change goes through a pull request.
 - **Never commit to `main` or fast-forward it.** Start each feature, fix or doc change on a new branch from an up-to-date `main`: `feat/<name>`, `fix/<name>` or `docs/<name>`.
 - **Open a PR with `gh pr create`** once the branch is pushed. The description covers what changed, why, and how it was tested (`docker build --target test .`, plus any dry run against real data). Keep pushing to the same branch for follow-ups.
 - **Don't merge a PR unless the maintainer asks.**
-- **Releases:** after merging, bump `version` in `pyproject.toml` and `__version__` in `src/ticktick_opentodo_sync/__init__.py` in their own PR, then tag `vX.Y.Z` on `main` and run `gh release create vX.Y.Z --verify-tag`.
+- **Releases are automatic.** Bump `version` in `pyproject.toml` and `__version__` in `src/ticktick_opentodo_sync/__init__.py` (they must match) in their own PR. When it merges, `.github/workflows/release.yml` tags `vX.Y.Z` on `main` and publishes a GitHub release with notes generated from the merged PRs. Merges without a bump release nothing.
+- **Stacked PRs:** before merging a PR that another PR is based on, retarget the dependent PR to `main` (`gh pr edit N --base main`). Deleting a base branch closes the PRs built on it instead of retargeting them.
 
 ## Logging and ops
 

@@ -254,6 +254,17 @@ class OpenTodo:
         )
         return self._open("task", _obj(resp), TASK_CONTENT)
 
+    def log_habit(self, habit_id: str, day: str, state: str, timezone: str | None) -> JSON:
+        """Log a habit's day as the app does (``done``, ``tiny``, ``skipped`` or ``clear``).
+
+        The current occurrence completes and moves the habit; an earlier day gets its record.
+        Returns ``{"habit": {..., "current_date"}, "days": [...]}``.
+        """
+        body: JSON = {"state": state, "date": day}
+        if timezone:
+            body["timezone"] = timezone
+        return _obj(self.http.request("POST", f"/api/v1/habits/{habit_id}/log", json=body))
+
     def delete_task(self, task_id: str) -> None:
         """Soft delete (to the Trash)."""
         self.http.request("DELETE", f"/api/v1/tasks/{task_id}", not_found_ok=True)

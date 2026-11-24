@@ -25,8 +25,25 @@ class FakeTickTick:
         self.projects_: dict[str, JSON] = {}
         self.tasks: dict[str, JSON] = {}
         self.writes: list[tuple[str, Any]] = []
+        self.habits_: dict[str, JSON] = {}
+        self.checkins: dict[tuple[str, int], int] = {}
 
     # helpers for tests
+    def add_habit(self, name: str, **fields: Any) -> str:
+        hid = _id("hb")
+        self.habits_[hid] = {
+            "id": hid,
+            "name": name,
+            "status": 0,
+            "type": "Boolean",
+            "goal": 1.0,
+            "repeatRule": "RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=SU,MO,TU,WE,TH,FR,SA",
+            "reminders": [],
+            "sectionId": "s-m",
+            "targetDays": 0,
+        } | fields
+        return hid
+
     def add_project(self, name: str, *, closed: bool = False) -> str:
         pid = _id("ttp")
         self.projects_[pid] = {"id": pid, "name": name, "closed": closed, "kind": "TASK"}
@@ -102,6 +119,46 @@ class FakeTickTick:
         else:
             t["status"] = 2
 
+    # habits: {id: raw}, sections, and check-ins {(habit id, stamp): status}
+    def habits(self) -> list[JSON]:
+        return [copy.deepcopy(h) for h in self.habits_.values()]
+
+    def habit_sections(self) -> list[JSON]:
+        return [
+            {"id": "s-m", "name": "_morning"},
+            {"id": "s-a", "name": "_afternoon"},
+            {"id": "s-n", "name": "_night"},
+        ]
+
+    def habit_checkins(self, habit_ids: list[str], from_stamp: int, to_stamp: int) -> list[JSON]:
+        return [
+            {
+                "habitId": hid,
+                "checkins": [
+                    {"stamp": st, "status": status, "opTime": "x"}
+                    for (h, st), status in sorted(self.checkins.items())
+                    if h == hid and from_stamp <= st <= to_stamp
+                ],
+            }
+            for hid in habit_ids
+        ]
+
+    def create_habit(self, body: JSON) -> JSON:
+        self.writes.append(("create_habit", body))
+        hid = _id("hb")
+        self.habits_[hid] = {"id": hid, "status": 0} | body
+        return copy.deepcopy(self.habits_[hid])
+
+    def update_habit(self, habit_id: str, body: JSON) -> JSON:
+        self.writes.append(("update_habit", body))
+        self.habits_[habit_id] |= body
+        return copy.deepcopy(self.habits_[habit_id])
+
+    def checkin(self, habit_id: str, body: JSON) -> JSON:
+        self.writes.append(("checkin", (habit_id, body["stamp"], body["status"])))
+        self.checkins[(habit_id, body["stamp"])] = body["status"]
+        return {}
+
     def completed_tasks(self, project_ids: list[str], start: Any, end: Any) -> list[JSON]:
         return [
             copy.deepcopy(t)
@@ -131,6 +188,8 @@ class FakeOpenTodo:
         self.writes: list[tuple[str, Any]] = []
         self.idempotency: dict[str, str] = {}
         self.refuse_occurrences = False
+        self.today: str | None = None
+        """Set by habit tests: OpenTodo's idea of today, for log_habit."""
 
     def add_project(self, name: str, *, archived: bool = False) -> str:
         pid = _id("otp")
@@ -214,6 +273,42 @@ class FakeOpenTodo:
         nxt = (datetime.fromisoformat(date) + timedelta(days=1)).date().isoformat()
         series["due"] = series["due"] | {"date": nxt}
         return copy.deepcopy(series)
+
+    def log_habit(self, habit_id: str, day: str, state: str, timezone: str | None) -> JSON:
+        """Like OpenTodo: the current day completes and moves the habit; an earlier day from
+        the habit's first one gets its own record; a later day is refused."""
+        self.writes.append(("log_habit", (habit_id, day, state)))
+        habit = self.tasks_[habit_id]
+        due = habit["due"]["date"]
+        records = {
+            t["occurrence_date"]: t
+            for t in self.tasks_.values()
+            if t.get("series_id") == habit_id and t["deleted_at"] is None
+        }
+        first = min([habit.setdefault("_first", due), *records])
+        if state == "clear":
+            if day in records:
+                records[day]["deleted_at"] = 1
+        elif day > due or day < first:
+            raise ApiError("OpenTodo", "POST", "log", 400, "not a scheduled day")
+        else:
+            rid = self.add_task(habit["title"], habit["project_id"])
+            self.tasks_[rid] |= {
+                "series_id": habit_id,
+                "occurrence_date": day,
+                "completed_at": 1,
+                "skipped": state == "skipped",
+            }
+            if day == due:
+                # OpenTodo moves to the next day that isn't past: an overdue habit jumps past
+                # today (seen 2026-11-24), whatever day was completed.
+                nxt = (datetime.fromisoformat(day) + timedelta(days=1)).date().isoformat()
+                if self.today and nxt <= self.today:
+                    nxt = (
+                        (datetime.fromisoformat(self.today) + timedelta(days=1)).date().isoformat()
+                    )
+                habit["due"] = {"date": nxt}
+        return {"habit": {"id": habit_id, "current_date": habit["due"]["date"]}}
 
     def delete_task(self, task_id: str) -> None:
         self.writes.append(("delete", task_id))

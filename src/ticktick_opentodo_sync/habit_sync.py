@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Protocol
 from zoneinfo import ZoneInfo
@@ -36,6 +37,7 @@ from .habits import (
 )
 from .http import ApiError
 from .models import JSON
+from .opentodo import PLACEHOLDER
 
 if TYPE_CHECKING:
     from .state import State
@@ -45,6 +47,9 @@ log = logging.getLogger(__name__)
 
 WINDOW_DAYS = 30
 """Check-ins are compared over the last 30 days (also the first run's backfill)."""
+DAILY_RULES = frozenset(
+    {"every day", "every monday, tuesday, wednesday, thursday, friday, saturday, sunday"}
+)
 HABITS_PROJECT = "Habits"
 META_PROJECT = "ot_habits_project"
 """Meta key: id of the OpenTodo project new habits go to (kept out of the task sync)."""
@@ -114,7 +119,26 @@ class HabitSync:
                 tt_defs[hid] = habit_from_tt(raw, section_names)
             except Unsupported as exc:
                 self._note(f"tt:{hid}", f"TickTick habit {raw.get('name')!r} not synced: {exc}")
-        ot_defs = {oid: habit_from_ot(raw) for oid, raw in ot_habits.items()}
+        pairs = st.habit_pairs(self.state)
+        pair_by_ot = {p.ot_id: p for p in pairs}
+        ot_defs: dict[str, HabitDef] = {}
+        damaged: set[str] = set()
+        for oid, raw in ot_habits.items():
+            h = habit_from_ot(raw)
+            if raw.get("title") == PLACEHOLDER:
+                # An open browser saved the create placeholder over the name (see the task
+                # sync's Snapshot.damaged): never an edit; the name from the last sync stands in.
+                p = pair_by_ot.get(oid)
+                if p is None or p.base is None:
+                    self._note(
+                        f"ot:{oid}",
+                        f"OpenTodo habit {oid} holds the create placeholder "
+                        "and isn't paired; delete it in OpenTodo",
+                    )
+                    continue
+                h = replace(h, name=p.base.name)
+                damaged.add(oid)
+            ot_defs[oid] = h
         ot_due = {
             oid: str((raw.get("due") or {}).get("date") or "") for oid, raw in ot_habits.items()
         }
@@ -124,7 +148,6 @@ class HabitSync:
         )
         ot_done = ot_done_days(r for r in ot_records if str(r.get("series_id")) in ot_defs)
 
-        pairs = st.habit_pairs(self.state)
         day_pairs = [(p.tt_id, p.ot_id) for p in pairs if p.tt_id in tt_defs and p.ot_id in ot_defs]
         names = {
             p.tt_id: (tt_defs.get(p.tt_id) or ot_defs[p.ot_id]).name
@@ -132,7 +155,7 @@ class HabitSync:
             if p.tt_id in tt_defs or p.ot_id in ot_defs
         }
 
-        for a in plan_habits(pairs, tt_defs, ot_defs):
+        for a in self._plan(pairs, tt_defs, ot_defs, damaged):
             desc = f"{a.kind.value} habit {a.habit.name!r}: {a.note}"
             if dry_run:
                 if a.kind is not HKind.REHASH:
@@ -155,6 +178,7 @@ class HabitSync:
             if a.kind in (HKind.CREATE_OT, HKind.CREATE_TT) and pair is not None:
                 day_pairs.append(pair)
                 names[pair[0]] = a.habit.name
+                ot_defs.setdefault(pair[1], a.habit)
 
         base = st.habit_days(self.state)
         actions = plan_days(day_pairs, days, tt_done, ot_done, base)
@@ -171,6 +195,78 @@ class HabitSync:
         self._apply_days(actions, names, ot_due, res, dry_run=dry_run)
         if not dry_run:
             st.prune_habit_days(self.state, days[0])
+        self._back_to_today(
+            day_pairs, ot_defs, ot_due, ot_records, tt_done, actions, days[-1], dry_run=dry_run
+        )
+
+    def _plan(
+        self,
+        pairs: list[HabitPair],
+        tt_defs: dict[str, HabitDef],
+        ot_defs: dict[str, HabitDef],
+        damaged: set[str],
+    ) -> list[HabitAction]:
+        """:func:`plan_habits`, plus a rewrite of every OpenTodo habit holding the placeholder."""
+        actions = plan_habits(pairs, tt_defs, ot_defs)
+        fixes = {
+            p.ot_id: HabitAction(
+                HKind.UPDATE_OT,
+                tt_defs[p.tt_id],
+                p.tt_id,
+                p.ot_id,
+                note="OpenTodo held the create placeholder: rewritten",
+            )
+            for p in pairs
+            if p.ot_id in damaged and p.tt_id in tt_defs
+        }
+        return [a for a in actions if a.ot_id not in fixes] + list(fixes.values())
+
+    def _back_to_today(
+        self,
+        day_pairs: list[tuple[str, str]],
+        ot_defs: dict[str, HabitDef],
+        ot_due: dict[str, str],
+        ot_records: Iterable[JSON],
+        tt_done: set[tuple[str, str]],
+        actions: list[DayAction],
+        today: str,
+        *,
+        dry_run: bool,
+    ) -> None:
+        """Keep a daily OpenTodo habit on today while today is still open on both sides.
+
+        Logging an overdue day completes OpenTodo's current occurrence, which jumps the habit
+        past today; it would then not be offered today. Skipped or done today: left alone.
+        """
+        logged = {
+            (str(r.get("series_id")), str(r.get("occurrence_date")))
+            for r in ot_records
+            if r.get("deleted_at") is None
+        }
+        # Today's state once this pass's writes are in (both sides then agree).
+        final = {a.tt_id: a.done for a in actions if a.day == today}
+        for tt_id, ot_id in day_pairs:
+            h = ot_defs.get(ot_id)
+            done_today = final.get(tt_id, (tt_id, today) in tt_done)
+            skipped_today = (ot_id, today) in logged and final.get(tt_id) is not False
+            if (
+                h is None
+                or h.rule not in DAILY_RULES
+                or not ot_due.get(ot_id, "") > today
+                or done_today
+                or skipped_today
+            ):
+                continue
+            if dry_run:
+                log.info("DRY-RUN would move OpenTodo habit %r back to today", h.name)
+                continue
+            try:
+                self.ot.update_task(ot_id, {"due": {"date": today}})
+            except Exception as exc:
+                log.error("could not move OpenTodo habit %s back to today: %s", ot_id, exc)  # noqa: TRY400
+                continue
+            ot_due[ot_id] = today
+            log.info("moved OpenTodo habit %r back to today", h.name)
 
     # --- definitions ------------------------------------------------------------------
 

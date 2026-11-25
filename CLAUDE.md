@@ -115,6 +115,10 @@ Settled answers from the build. Dates are when they were decided or learned.
   - Safety: without a usable key the pass refuses to run; values that don't decrypt keep their task/project/label out of scope; the TickTick client refuses any write containing `enc:vN:`.
 - **TickTick "Won't Do"** (status `-1`): treated as completed. OpenTodo has no equivalent state.
 - **Seeding:** OpenTodo should start empty and be seeded from TickTick. `--match-existing` is the fallback. Safety net: a real run refuses to start with an empty pair table while OpenTodo has open tasks (e.g. leftovers from a failed import).
+- **State write failures** (2026-11-25). A remote create whose pair couldn't be recorded (disk full) was created again by every later pass, and its copy was copied back, so the duplicates doubled each pass.
+  - Before a pass first writes to either app, it proves the state is writable (`State.check_writable`, one small meta write). Passes with nothing to write still write nothing.
+  - Any `sqlite3.Error` ends the pass; the per-action handlers re-raise it.
+  - Remaining risk: a crash between a remote create and recording its pair still leaves one duplicate on each side.
 - **Tags ↔ labels:** OpenTodo has no tags. It has labels, referenced by ID. They are matched by lowercase name, and missing labels are created.
 - **Priority mapping:** TickTick `0/1/3/5` (none/low/medium/high) ↔ OpenTodo `4/3/2/1` (1 is highest, 4 is the default).
 - **Conflicts:** TickTick wins every field except completion. A completion made on either side is never undone by a conflict ("Completed in either app" takes priority).

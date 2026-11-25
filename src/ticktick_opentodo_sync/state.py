@@ -95,10 +95,27 @@ class State:
         self.db.execute("BEGIN")
         try:
             yield
+            self.db.execute("COMMIT")
         except BaseException:
-            self.db.execute("ROLLBACK")
+            # A failed COMMIT can leave the transaction open (and SQLite may already have
+            # rolled back after a disk error): never leave the loop's connection inside one.
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
             raise
-        self.db.execute("COMMIT")
+
+    def check_writable(self) -> None:
+        """Prove the state can be written right now; raises ``sqlite3.Error`` if not.
+
+        A pass calls this before it writes to either app. A task created in one app whose
+        pair can't be recorded is created again by every later pass, and its copy copied
+        back, so the duplicates double each pass. One small write per pass that writes
+        anyway (a fresh value, so it reaches the disk: an unchanged row isn't rewritten).
+        """
+        self.db.execute(
+            "INSERT INTO meta (key, value) VALUES ('write_check', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(time.time_ns()),),
+        )
 
     # meta ------------------------------------------------------------------------------
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable
@@ -280,6 +281,8 @@ class Syncer:
         plan = reconcile_projects(self.state.project_pairs(), tt_projects, ot_projects)
         pairs = dict(plan.pairs)
         verb = "would " if dry_run else ""
+        if not dry_run and (plan.create_in_ot or plan.create_in_tt):
+            self.state.check_writable()
         for tt_id in plan.stale:
             log.info("%sforget project pair for vanished list %s", verb, tt_id)
             if not dry_run:
@@ -548,6 +551,8 @@ class Syncer:
                 )
             return res
 
+        if not dry_run and (actions or item_actions):
+            self.state.check_writable()
         for a in actions:
             self._apply(a, w, res, dry_run=dry_run)
         self._apply_items(item_actions, w, res, dry_run=dry_run)
@@ -568,6 +573,8 @@ class Syncer:
                 dry_run=dry_run,
                 allow_bulk=allow_bulk,
             )
+        except sqlite3.Error:
+            raise  # see _apply
         except Exception as exc:
             res.errors += 1
             log.error("habit sync failed: %s", exc)  # noqa: TRY400
@@ -704,6 +711,10 @@ class Syncer:
         }[a.kind]
         try:
             handler(a, w)
+        except sqlite3.Error:
+            # The state couldn't record what was just written: stop the whole pass. Carrying
+            # on would make more writes that can't be recorded either.
+            raise
         except Exception as exc:
             res.errors += 1
             log.error("failed to %s: %s", desc, exc)  # noqa: TRY400
@@ -900,6 +911,8 @@ class Syncer:
         for parent, group in to_tt.items():
             try:
                 self._apply_items_tt(parent, group, w)
+            except sqlite3.Error:
+                raise  # see _apply
             except Exception as exc:
                 res.errors += len(group)
                 log.error("failed to update checklist of %s: %s", parent, exc)  # noqa: TRY400
@@ -940,6 +953,8 @@ class Syncer:
                 self.state.update_pair(
                     a.tt_id, tt_hash=a.tt_hash, ot_hash=a.ot_hash, base=a.task, table=ITEMS
                 )
+        except sqlite3.Error:
+            raise  # see _apply
         except Exception as exc:
             res.errors += 1
             log.error("failed to %s: %s", self._describe_item(a, w), exc)  # noqa: TRY400

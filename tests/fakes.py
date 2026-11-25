@@ -4,14 +4,27 @@ from __future__ import annotations
 
 import copy
 import itertools
+import sqlite3
 from datetime import datetime, timedelta
 from typing import Any
 
 from ticktick_opentodo_sync.http import ApiError
 from ticktick_opentodo_sync.mapping import format_tt_datetime, parse_tt_datetime
 from ticktick_opentodo_sync.models import JSON
+from ticktick_opentodo_sync.state import State
 
 _ids = itertools.count(1)
+
+_WRITES = frozenset({sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE})
+
+
+def deny_writes(state: State) -> None:
+    """Make every state write fail, like a full disk or a failing SD card (``None`` undoes)."""
+
+    def authorizer(action: int, *_: object) -> int:
+        return sqlite3.SQLITE_DENY if action in _WRITES else sqlite3.SQLITE_OK
+
+    state.db.set_authorizer(authorizer)
 
 
 def _id(prefix: str) -> str:

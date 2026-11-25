@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
-from fakes import FakeOpenTodo, FakeTickTick
+from fakes import FakeOpenTodo, FakeTickTick, deny_writes
 
 from ticktick_opentodo_sync.opentodo import PLACEHOLDER
 from ticktick_opentodo_sync.state import State
@@ -260,6 +261,40 @@ def test_first_sync_refuses_when_opentodo_has_open_tasks(env: Env) -> None:
     env.ot.add_task("leftover from import")
     res = env.run()
     assert res.refused and env.ot.writes == [] and env.tt.writes == []
+
+
+def test_unwritable_state_writes_nothing_to_either_app(env: Env) -> None:
+    """A create whose pair can't be recorded is made again by every later pass, and its copy
+    copied back: before the write check, the duplicates doubled each pass (disk full)."""
+    seed(env)
+    env.tt.add_task("New in TickTick")
+    env.ot.add_task("New in OpenTodo")
+    writes = (len(env.tt.writes), len(env.ot.writes))
+    deny_writes(env.state)
+    for _ in range(3):
+        with pytest.raises(sqlite3.DatabaseError):
+            env.run()
+    assert (len(env.tt.writes), len(env.ot.writes)) == writes
+
+    env.state.db.set_authorizer(None)  # space freed
+    res = env.run()
+    assert (res.tt.created, res.ot.created) == (1, 1), res.summary()
+    env.assert_quiet()
+
+
+def test_state_error_mid_pass_stops_it(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The disk fills after the write check: the pass stops at the first pair it can't record."""
+    seed(env)
+    env.tt.add_task("One")
+    env.tt.add_task("Two")
+
+    def disk_full(*_: object, **__: object) -> None:
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(State, "put_pair", disk_full)
+    with pytest.raises(sqlite3.OperationalError):
+        env.run()
+    assert len([t for t in env.ot.live() if t["title"] in ("One", "Two")]) == 1
 
 
 def test_closed_list_is_out_of_scope(env: Env) -> None:

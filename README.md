@@ -201,6 +201,7 @@ The same limit applies to habit check-ins being cleared in TickTick.
 ## How it behaves
 
 - **Change detection:** neither API can list only what changed, so each pass reads all open TickTick tasks (one request per list) and all OpenTodo tasks. Each pair of tasks stores a fingerprint of both sides from the last pass. After every write the new fingerprint is saved at once, so the sync never mistakes its own writes for your edits.
+- **State file:** before a pass writes to either app, it checks that it can write its state file. If it can't (a full disk, a failing SD card), the pass stops there, writes nothing to either app, and the container shows unhealthy until the file can be written again.
 - **Conflicts:** if both sides changed, TickTick's version overwrites OpenTodo, logged as `WARNING … [conflict]`. Completion is the exception: a task completed on either side stays completed.
 - **Deletes:** deleting in TickTick moves the OpenTodo task to its Trash. Deleting in OpenTodo deletes in TickTick, unless the task was also edited in TickTick since the last pass; then TickTick wins and the task is recreated in OpenTodo.
 - **Completed tasks:** TickTick's API only lists open tasks. When a paired task disappears, the sync fetches it once to tell *completed* from *deleted*.

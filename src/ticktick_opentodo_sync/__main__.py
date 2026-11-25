@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import signal
+import sqlite3
 import sys
 import threading
 import time
@@ -159,14 +160,19 @@ def _one_pass(cfg: Config, syncer: Syncer, args: argparse.Namespace, dry_run: bo
         log.warning("%s; skipping this pass", exc)
         return EXIT_BLOCKED
     except Exception as exc:
-        log.error("sync pass failed: %s", exc)  # noqa: TRY400
+        error = str(exc)
+        if isinstance(exc, sqlite3.Error):
+            # Raised before the pass wrote to either app, or right after a write it couldn't
+            # record. Nothing more is written to either app until the state is writable.
+            error = f"state database {cfg.db_path}: {exc}"
+        log.error("sync pass failed: %s", error)  # noqa: TRY400
         log.debug("traceback", exc_info=True)
         _write_heartbeat(
             cfg,
             {
                 "at": time.time(),
                 "ok": False,
-                "error": str(exc),
+                "error": error,
                 "interval": cfg.interval,
                 "dry_run": dry_run,
             },

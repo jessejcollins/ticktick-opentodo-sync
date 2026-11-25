@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
-from fakes import FakeOpenTodo, FakeTickTick
+from fakes import FakeOpenTodo, FakeTickTick, deny_writes
 
 from ticktick_opentodo_sync.habit_sync import META_PROJECT
 from ticktick_opentodo_sync.habits import (
@@ -349,6 +350,17 @@ def test_definition_changes(env: Env) -> None:
     assert res.habits_tt.updated == 1, res.summary()
     assert env.tt.habits_[hid]["sectionId"] == "s-a"
     env.quiet()
+
+
+def test_unwritable_state_creates_no_habit(env: Env) -> None:
+    """A habit created without its pair recorded would be created again every pass, and
+    TickTick habits can't be deleted through the API."""
+    env.run()  # records the inbox id: from here on only the habit writes anything
+    env.tt.add_habit("Read")
+    deny_writes(env.state)
+    with pytest.raises(sqlite3.DatabaseError):
+        env.run()
+    assert not env.ot.writes and not env.tt.writes
 
 
 def test_unsupported_and_archived_habits_are_left_alone(env: Env) -> None:

@@ -6,6 +6,7 @@ Runs after the task pass, on the OpenTodo tasks that pass already fetched.
 from __future__ import annotations
 
 import logging
+import sqlite3
 from collections.abc import Callable, Iterable
 from dataclasses import replace
 from datetime import UTC, date, datetime
@@ -159,7 +160,10 @@ class HabitSync:
             if p.tt_id in tt_defs or p.ot_id in ot_defs
         }
 
-        for a in self._plan(pairs, tt_defs, ot_defs, damaged):
+        habit_actions = self._plan(pairs, tt_defs, ot_defs, damaged)
+        if habit_actions and not dry_run:
+            self.state.check_writable()
+        for a in habit_actions:
             desc = f"{a.kind.value} habit {a.habit.name!r}: {a.note}"
             if dry_run:
                 if a.kind is not HKind.REHASH:
@@ -171,6 +175,8 @@ class HabitSync:
                     pair = self._apply_habit(
                         a, tt_raw, tt_done, days, section_names, section_ids, ot_due, ot_project_ids
                     )
+                except sqlite3.Error:
+                    raise  # the pair can't be recorded: stop the pass (see Syncer._apply)
                 except Exception as exc:
                     res.errors += 1
                     log.error("failed to %s: %s", desc, exc)  # noqa: TRY400
@@ -197,6 +203,8 @@ class HabitSync:
                 self.max_destructive,
             )
             return
+        if actions and not dry_run:
+            self.state.check_writable()
         self._apply_days(actions, names, ot_due, res, dry_run=dry_run)
         if not dry_run:
             st.prune_habit_days(self.state, days[0])

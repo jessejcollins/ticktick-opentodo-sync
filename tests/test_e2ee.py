@@ -18,7 +18,12 @@ from fakes import FakeTickTick
 
 from ticktick_opentodo_sync import e2ee
 from ticktick_opentodo_sync.http import Http
-from ticktick_opentodo_sync.opentodo import PLACEHOLDER, EncryptionLockedError, OpenTodo
+from ticktick_opentodo_sync.opentodo import (
+    PLACEHOLDER,
+    EncryptionExpectedError,
+    EncryptionLockedError,
+    OpenTodo,
+)
 from ticktick_opentodo_sync.state import State
 from ticktick_opentodo_sync.sync import Syncer
 from ticktick_opentodo_sync.ticktick import CiphertextWriteError, TickTick
@@ -228,6 +233,40 @@ def client(**secrets: str) -> OpenTodo:
         unlock_passphrase=lambda r, p: e2ee.unlock_with_passphrase(r, p, min_iterations=1000),
         **secrets,
     )
+
+
+def _me(router: respx.MockRouter, body: dict[str, Any]) -> None:
+    router.get(f"{OT}/api/v1/me").mock(return_value=httpx.Response(200, json=body))
+
+
+@pytest.mark.parametrize("me", [{"encryption": {"enabled": False}}, {"id": "u1"}])
+def test_secret_set_but_encryption_not_reported_on(me: dict[str, Any]) -> None:
+    """2026-11-25 review: a server saying "off" (or a /me without the field) got every write
+    in plaintext, decrypted with the key from the earlier passes."""
+    with respx.mock(assert_all_called=False) as router:
+        server = EncryptedServer(router)
+        ot = client(recovery_key=RECOVERY_TEXT)
+        ot.begin_pass()
+        task = ot.create_task({"title": "Secret"}, idempotency_key="k")
+        _me(router, me)
+        with pytest.raises(EncryptionExpectedError, match="remove the secret"):
+            ot.begin_pass()
+        ot.update_task(task["id"], {"title": "Secret two"})  # a caller carrying on anyway
+
+        fresh = client(recovery_key=RECOVERY_TEXT)
+        with pytest.raises(EncryptionExpectedError):
+            fresh.begin_pass()
+        with pytest.raises(EncryptionLockedError):
+            fresh.create_task({"title": "Secret three"}, idempotency_key="k3")
+        assert "Secret" not in json.dumps([w[2] for w in server.writes])
+
+
+@pytest.mark.parametrize("enc", [{"enabled": "yes"}, {"keyVersion": 1}, True, []])
+def test_malformed_encryption_field_stops_the_pass(enc: object) -> None:
+    with respx.mock() as router:
+        _me(router, {"encryption": enc})
+        with pytest.raises(TypeError, match="encryption"):
+            client().begin_pass()
 
 
 def test_locked_without_secret(server: EncryptedServer) -> None:

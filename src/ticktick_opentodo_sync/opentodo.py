@@ -41,6 +41,10 @@ class EncryptionLockedError(Exception):
     """OpenTodo is encrypted and this client has no usable key."""
 
 
+class EncryptionExpectedError(Exception):
+    """A passphrase or recovery key is set, but OpenTodo doesn't report encryption on."""
+
+
 class OpenTodo:
     def __init__(
         self,
@@ -55,6 +59,8 @@ class OpenTodo:
         self.http = http
         self._passphrase = passphrase
         self._recovery_key = recovery_key
+        self._expects_encryption = bool(passphrase or recovery_key)
+        """A secret is set: content is never written in plaintext, whatever the server says."""
         self._unlock_passphrase = unlock_passphrase
         self._key: e2ee.AccountKey | None = None
         self._key_version: int | None = None
@@ -65,19 +71,36 @@ class OpenTodo:
     # --- encryption ---------------------------------------------------------------------
 
     def begin_pass(self) -> None:
-        """Check the account's encryption and unlock (or re-unlock) the key if needed."""
+        """Check the account's encryption and unlock (or re-unlock) the key if needed.
+
+        With a passphrase or recovery key set, encryption is expected: unless OpenTodo reports
+        it on, the pass stops. Otherwise a server answering "off" (or a ``/me`` that changed
+        shape) would get every write in plaintext, decrypted with the key from earlier passes.
+        """
         me = self.http.request("GET", "/api/v1/me")
         if not isinstance(me, dict):
             # Never read "encryption off" from a response we don't understand.
             raise TypeError(f"unexpected GET /api/v1/me response: {type(me).__name__}")
         enc = me.get("encryption")
-        enc = enc if isinstance(enc, dict) else {}
-        self.encrypted = bool(enc.get("enabled"))
-        if not self.encrypted:
+        version: object = None
+        if enc is None:
+            enabled = False  # a server without end-to-end encryption
+        elif isinstance(enc, dict) and isinstance(enc.get("enabled"), bool):
+            enabled, version = enc["enabled"], enc.get("keyVersion")
+        else:
+            raise TypeError(f"unexpected GET /api/v1/me encryption: {enc!r}")
+        if not enabled and self._expects_encryption:
+            raise EncryptionExpectedError(
+                "OPENTODO_ENCRYPTION_PASSPHRASE or OPENTODO_ENCRYPTION_RECOVERY_KEY is set, but "
+                "OpenTodo doesn't report end-to-end encryption on, so nothing is written. If "
+                "you turned encryption off, remove the secret from .env"
+            )
+        self.encrypted = enabled
+        if not enabled:
             return
-        version = enc.get("keyVersion")
         if self._key is not None and self._key_version == version:
             return
+        self._key = None  # stale (or never unlocked): unusable until the unlock below succeeds
         if not (self._passphrase or self._recovery_key):
             raise EncryptionLockedError(
                 "OpenTodo has end-to-end encryption on: set OPENTODO_ENCRYPTION_PASSPHRASE "
@@ -110,15 +133,25 @@ class OpenTodo:
                 obj[UNREADABLE] = True
         return obj
 
+    def _sealing_key(self) -> e2ee.AccountKey | None:
+        """The key writes are encrypted with; None only for an account without encryption.
+
+        Never None while a secret is set, even if :meth:`begin_pass` failed or wasn't called.
+        """
+        if self.encrypted and self._key is not None:
+            return self._key
+        if self.encrypted or self._expects_encryption:
+            raise EncryptionLockedError("OpenTodo encryption is not unlocked; nothing is written")
+        return None
+
     def _seal(self, entity: str, obj_id: str, body: JSON, fields: tuple[str, ...]) -> JSON:
-        if not self.encrypted:
+        key = self._sealing_key()
+        if key is None:
             return body
-        if self._key is None:
-            raise EncryptionLockedError("OpenTodo is encrypted but not unlocked")
         out = dict(body)
         for f in fields:
             if isinstance(out.get(f), str):
-                out[f] = self._key.seal(entity, obj_id, f, out[f])
+                out[f] = key.seal(entity, obj_id, f, out[f])
         return out
 
     def _create_sealed(
@@ -131,7 +164,7 @@ class OpenTodo:
     ) -> JSON:
         """Create with placeholder content, then PATCH the content sealed for the new id."""
         path = f"/api/v1/{collection}"
-        if not self.encrypted:
+        if self._sealing_key() is None:
             return self._open(
                 entity, _obj(self.http.request("POST", path, json=body, headers=headers)), fields
             )

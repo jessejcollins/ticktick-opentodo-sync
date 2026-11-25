@@ -227,6 +227,7 @@ With encryption on, OpenTodo's server only holds ciphertext for task titles and 
 - **Changing the passphrase or resetting the recovery key** elsewhere makes the stored one stop working. Update `.env` and restart.
 - **Values that don't decrypt** keep their task, project or label out of the sync, with a warning. They're never mistaken for an edit or a deletion.
 - **Safety checks:**
+  - With a secret set, OpenTodo must report encryption on. If it says it's off, or stops saying, every pass stops instead of writing plaintext. If you turn encryption off in OpenTodo, remove the secret from `.env`.
   - The TickTick client refuses to write any encrypted value.
   - If a browser tab open on OpenTodo overwrites a just-created task, habit or project with the sync's temporary placeholder, the next pass puts the content back from TickTick.
 

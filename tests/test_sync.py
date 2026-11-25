@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from fakes import FakeOpenTodo, FakeTickTick
 
+from ticktick_opentodo_sync.opentodo import PLACEHOLDER
 from ticktick_opentodo_sync.state import State
 from ticktick_opentodo_sync.sync import PassResult, Syncer
 
@@ -75,6 +76,19 @@ def test_seed_creates_everything_in_opentodo(env: Env) -> None:
     assert [env.ot.label_name(x) for x in report["labels"]] == ["office"]
     assert env.state.pair_count() == 2
     assert env.state.get_meta("tt_inbox_id") == "inbox100"
+    env.assert_quiet()
+
+
+def test_placeholder_project_name_is_repaired(env: Env) -> None:
+    """A browser saved the create placeholder over a paired project's name."""
+    seed(env)
+    pid = next(iter(env.ot.projects_))
+    env.ot.projects_[pid]["name"] = PLACEHOLDER
+    env.ot.add_project(PLACEHOLDER)  # not paired: left alone
+    env.run()
+    assert sorted(p["name"] for p in env.ot.projects_.values()) == sorted(["Work", PLACEHOLDER])
+    assert env.ot_by_title("Report")["project_id"] == pid
+    assert [p["name"] for p in env.tt.projects_.values()] == ["Work"]
     env.assert_quiet()
 
 

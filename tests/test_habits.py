@@ -353,6 +353,21 @@ def test_placeholder_name_is_repaired_never_copied(env: Env) -> None:
     env.quiet()
 
 
+def test_placeholder_habits_project_name_is_repaired(env: Env) -> None:
+    """2026-11-24: the browser race also hit the "Habits" project's name."""
+    env.tt.add_habit("Read")
+    env.run()
+    pid = env.state.get_meta(META_PROJECT)
+    assert pid
+    env.ot.projects_[pid]["name"] = PLACEHOLDER
+    env.run(dry_run=True)
+    assert env.ot.projects_[pid]["name"] == PLACEHOLDER
+    env.run()
+    assert env.ot.projects_[pid]["name"] == "Habits"
+    assert not [p for p in env.tt.projects_.values() if p["name"] in ("Habits", PLACEHOLDER)]
+    env.quiet()
+
+
 def test_skipped_today_is_left_alone(env: Env) -> None:
     hid = env.tt.add_habit("Run")
     env.tt.checkins[(hid, 20261120)] = 2

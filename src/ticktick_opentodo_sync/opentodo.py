@@ -203,7 +203,9 @@ class OpenTodo:
         return [self._open("project", p, NAME_CONTENT) for p in items]
 
     def create_project(self, name: str) -> JSON:
-        return self._create_sealed("project", "projects", {"name": name}, NAME_CONTENT)
+        return self._create_sealed(
+            "project", "projects", {"name": name}, NAME_CONTENT, _idempotency_key()
+        )
 
     def rename_project(self, project_id: str, name: str) -> JSON:
         sealed = self._seal("project", project_id, {"name": name}, NAME_CONTENT)
@@ -227,7 +229,9 @@ class OpenTodo:
         return [self._open("label", x, NAME_CONTENT) for x in items]
 
     def create_label(self, name: str) -> JSON:
-        return self._create_sealed("label", "labels", {"name": name}, NAME_CONTENT)
+        return self._create_sealed(
+            "label", "labels", {"name": name}, NAME_CONTENT, _idempotency_key()
+        )
 
     def tasks(self) -> list[JSON]:
         """Open, completed and soft-deleted (``deleted_at`` set) tasks, with :data:`REMINDERS`."""
@@ -292,7 +296,7 @@ class OpenTodo:
                 "POST",
                 "/api/v1/reminders",
                 json={"task_id": task_id, "kind": "relative", "offset_minutes": minutes},
-                headers={"Idempotency-Key": f"ticktick-opentodo-sync-{uuid.uuid4()}"},
+                headers=_idempotency_key(),
             )
             current.append(_obj(created) | {"offset_minutes": minutes})
 
@@ -318,6 +322,11 @@ class OpenTodo:
     def delete_task(self, task_id: str) -> None:
         """Soft delete (to the Trash)."""
         self.http.request("DELETE", f"/api/v1/tasks/{task_id}", not_found_ok=True)
+
+
+def _idempotency_key() -> dict[str, str]:
+    """A fresh key for one create: OpenTodo dedupes that call's retries (see Http.request)."""
+    return {"Idempotency-Key": f"ticktick-opentodo-sync-{uuid.uuid4()}"}
 
 
 def _split_reminders(body: JSON) -> tuple[JSON, list[int] | None]:

@@ -78,7 +78,7 @@ ticktick-opentodo-sync/
   src/ticktick_opentodo_sync/
     __main__.py            # CLI: `ticktick-opentodo-sync [--dry-run|--apply] [--loop [N]] [--status] ...`
     config.py
-    http.py                # shared httpx client: throttle + retry on 429/5xx
+    http.py                # shared httpx client: throttle + retry (only what's safe to repeat)
     ticktick.py            # TickTick API client
     opentodo.py            # OpenTodo API client (E2EE, reminders reconciled here)
     e2ee.py                # OpenTodo end-to-end encryption
@@ -128,6 +128,10 @@ Settled answers from the build. Dates are when they were decided or learned.
   - Any `sqlite3.Error` ends the pass; the per-action handlers re-raise it.
   - Remaining risk: a crash between a remote create and recording its pair still leaves one duplicate on each side.
 - **A pair's TickTick list** (2026-11-25): `pairs.tt_project` is the list the task was last seen in, refreshed every pass (written only when it changed). TickTick's GET and DELETE take the list in the path. Whether they answer for a task under another list is unverified, so the fakes treat that as a 404 (see `docs/api-notes.md`).
+- **Retries** (2026-11-25). Retrying everything after timeouts and 5xx repeated creates whose answer was lost (duplicates) and TickTick completions (a repeating task moved on twice).
+  - **Repeated freely:** requests that are safe to repeat: GET, PUT, PATCH, DELETE, and a POST with an `Idempotency-Key` (OpenTodo dedupes it). OpenTodo project and label creates now carry one too.
+  - **Marked repeatable:** TickTick's POST reads, task and habit updates, check-ins and moves (`idempotent=True`).
+  - **Everything else** (TickTick creates and completions, OpenTodo habit logs and occurrence completions) is repeated only when the answer says it wasn't acted on: a connection error, 429, or 503 with `Retry-After`. Otherwise the action fails with a warning and the next pass reconciles. For task and habit creates that still means one duplicate when the lost request did go through; lists, projects and labels are matched by name next pass instead.
 - **Tags ↔ labels:** OpenTodo has no tags. It has labels, referenced by ID. They are matched by lowercase name, and missing labels are created.
 - **Priority mapping:** TickTick `0/1/3/5` (none/low/medium/high) ↔ OpenTodo `4/3/2/1` (1 is highest, 4 is the default).
 - **Conflicts:** TickTick wins every field except completion. A completion made on either side is never undone by a conflict ("Completed in either app" takes priority).

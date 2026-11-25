@@ -69,7 +69,7 @@ Base: `https://api.ticktick.com`
 
 ### Rate limits
 
-Not documented. ticktick-opentodo-sync spaces requests (`TICKTICK_OPENTODO_SYNC_HTTP_MIN_INTERVAL`, default 0.3 s) and retries 429/5xx with backoff, honouring `Retry-After`. One pass is about `3 + number of lists` requests plus one GET per task that disappeared.
+Not documented. ticktick-opentodo-sync spaces requests (`TICKTICK_OPENTODO_SYNC_HTTP_MIN_INTERVAL`, default 0.3 s). It retries connection errors, timeouts, 429 and 5xx with backoff, honouring `Retry-After`, but only for requests that are safe to repeat: reads (including TickTick's POST reads), updates, deletes and check-ins. A create or a completion is repeated only when the answer says it wasn't acted on (a connection error, 429, 503 with `Retry-After`). Repeating a TickTick task create whose answer was lost makes a duplicate, and repeating `…/complete` moves a repeating task on twice. One pass is about `3 + number of lists` requests plus one GET per task that disappeared.
 
 ### Recurrence
 

@@ -57,6 +57,83 @@ def test_gives_up_and_raises() -> None:
 
 
 @respx.mock
+def test_create_or_completion_not_repeated_after_an_unknown_outcome(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A repeated create whose answer was lost made a duplicate, and a repeated completion
+    moved a repeating task on twice (review #7)."""
+    tt = TickTick(http(TT))
+    create = respx.post(f"{TT}/open/v1/task")
+    unknown: list[Exception | httpx.Response] = [
+        httpx.ReadTimeout("slow"),
+        httpx.RemoteProtocolError("dropped"),
+        httpx.Response(500),
+        httpx.Response(502),
+        httpx.Response(503),  # without Retry-After
+        httpx.Response(504),
+    ]
+    for answer in unknown:
+        before = create.call_count
+        create.mock(side_effect=[answer, httpx.Response(200, json={"id": "t"})])
+        with pytest.raises((httpx.TransportError, ApiError)):
+            tt.create_task({"title": "x", "projectId": "p"})
+        assert create.call_count == before + 1
+    assert "may have gone through" in caplog.text
+
+    complete = respx.post(f"{TT}/open/v1/project/p/task/t/complete").mock(
+        side_effect=[httpx.Response(504), httpx.Response(200)]
+    )
+    with pytest.raises(ApiError, match="504"):
+        tt.complete_task("p", "t")
+    assert complete.call_count == 1
+
+
+@respx.mock
+def test_create_repeated_when_it_cannot_have_gone_through() -> None:
+    tt = TickTick(http(TT))
+    create = respx.post(f"{TT}/open/v1/task")
+    not_acted_on: list[Exception | httpx.Response] = [
+        httpx.ConnectError("refused"),
+        httpx.ConnectTimeout("no route"),
+        httpx.Response(429),
+        httpx.Response(503, headers={"Retry-After": "1"}),
+    ]
+    for answer in not_acted_on:
+        create.mock(side_effect=[answer, httpx.Response(200, json={"id": "t"})])
+        assert tt.create_task({"title": "x", "projectId": "p"}) == {"id": "t"}
+
+
+@respx.mock
+def test_repeatable_requests_are_retried() -> None:
+    """Updates, reads sent as POST, and creates carrying an Idempotency-Key."""
+    tt = TickTick(http(TT))
+    upd = respx.post(f"{TT}/open/v1/task/t1").mock(
+        side_effect=[
+            httpx.ReadTimeout("slow"),
+            httpx.Response(502),
+            httpx.Response(200, json={"id": "t1"}),
+        ]
+    )
+    assert tt.update_task("t1", {"title": "x"}) == {"id": "t1"}
+    assert upd.call_count == 3
+
+    pref = respx.post(f"{TT}/open/v1/preference").mock(
+        side_effect=[httpx.Response(500), httpx.Response(200, json={"timeZone": "UTC"})]
+    )
+    assert tt.preference_timezone() == "UTC" and pref.call_count == 2
+
+    create = respx.post(f"{OT}/api/v1/projects").mock(
+        side_effect=[
+            httpx.ReadTimeout("slow"),
+            httpx.Response(201, json={"id": "p1", "name": "Work"}),
+        ]
+    )
+    assert OpenTodo(http(OT)).create_project("Work")["id"] == "p1"
+    # The same key both times, so OpenTodo dedupes the retry.
+    assert len({c.request.headers["Idempotency-Key"] for c in create.calls}) == 1
+
+
+@respx.mock
 def test_client_error_is_not_retried() -> None:
     route = respx.post(f"{OT}/api/v1/tasks").mock(return_value=httpx.Response(400, json={}))
     with pytest.raises(ApiError):

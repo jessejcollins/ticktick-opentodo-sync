@@ -63,7 +63,7 @@ Base: `https://api.ticktick.com`
   - Task with `deleted` truthy → deleted (**UNVERIFIED** field, handled in case trashed tasks are still returned).
   - `status` `2` or `-1` → completed.
   - `status` `0` → still open but out of scope (moved to a closed list or turned into a subtask). Left alone.
-- If a task's last known state was completed, it is not refetched; it is assumed unchanged until it shows up open again.
+- If a task's last known state was completed, it is not refetched; it is assumed unchanged until it shows up open again. The exception is when its OpenTodo copy changed: that change will be written back, so the task is fetched first, and if it's gone it counts as deleted in TickTick (2026-11-25; before, the write failed on every pass).
 - Each pair stores the list its task was last seen in, refreshed on every pass that sees the task (2026-11-25). Before, only the sync's own moves updated it, so a task moved in the TickTick app and later completed was looked up under its old list. **UNVERIFIED** whether `GET`/`DELETE …/project/{another list}/task/{id}` answers 404; the sync assumes it may, and the test fakes do.
 - Caveat: a task moved to a list ticktick-opentodo-sync doesn't pull (or moved and completed between two passes) is still looked up under its previous list, may 404 and be treated as deleted. The bulk-delete guard limits the blast radius.
 

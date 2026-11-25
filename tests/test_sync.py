@@ -252,6 +252,20 @@ def test_wont_do_counts_as_completed(env: Env) -> None:
     assert env.ot_by_title("Report")["completed_at"] is not None
 
 
+def test_completed_then_deleted_in_ticktick_then_edited_in_opentodo(env: Env) -> None:
+    """It failed every pass: a completed pair isn't fetched again, so the deletion went
+    unseen, and writing the OpenTodo edit back found no TickTick task."""
+    a, _ = seed(env)
+    env.tt.tasks[a]["status"] = 2
+    env.run()  # completed in OpenTodo too
+    del env.tt.tasks[a]  # then deleted in TickTick
+    env.ot_by_title("Inbox thing")["title"] = "Inbox thing, edited"
+    res = env.run()
+    assert res.ok and res.ot.deleted == 1, res.summary()  # deleted in TickTick wins
+    assert env.ot_by_title("Inbox thing, edited")["deleted_at"] is not None
+    env.assert_quiet()
+
+
 def test_reopen_in_opentodo_reopens_in_ticktick(env: Env) -> None:
     _, b = seed(env)
     env.tt.tasks[b]["status"] = 2

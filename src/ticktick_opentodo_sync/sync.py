@@ -590,7 +590,12 @@ class Syncer:
                 continue
             if p.ot_id in w.ot.out_of_scope:
                 continue
-            if p.base is not None and p.base.completed:
+            ot_task = w.ot.tasks.get(p.ot_id)
+            ot_changed = ot_task is not None and ot_task.content_hash() != p.ot_hash
+            if p.base is not None and p.base.completed and not ot_changed:
+                # Completed at the last sync and nothing to write back: not fetched again.
+                # A changed OpenTodo copy is written to TickTick, so it's looked up first: a
+                # deletion there would otherwise go unseen, and the write would fail every pass.
                 w.tt.unchanged.add(p.tt_id)
                 continue
             raw = self.tt.get_task(p.tt_project, p.tt_id)

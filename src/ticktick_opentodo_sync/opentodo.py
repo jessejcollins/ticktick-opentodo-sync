@@ -338,11 +338,26 @@ def _split_reminders(body: JSON) -> tuple[JSON, list[int] | None]:
 
 
 def _items(data: Any, key: str) -> list[JSON]:
-    """The ``key`` list of a response; anything else raises (never read as "none")."""
+    """The ``key`` list of a response; anything else raises (never read as "none").
+
+    So does a listing that says it is one page of several: no paging is documented, and an
+    absent task reads as deleted (an absent reminder as removed, with no bulk guard).
+    """
     items = data.get(key) if isinstance(data, dict) else None
     if not isinstance(items, list):
         raise TypeError(f"unexpected OpenTodo response: no {key!r} list")
+    if _more_pages(data, len(items)):
+        raise TypeError(f"OpenTodo sent one page of {key}; this sync can't page them yet")
     return [x for x in items if isinstance(x, dict)]
+
+
+def _more_pages(data: JSON, n: int) -> bool:
+    if data.get("has_more") or data.get("hasMore"):
+        return True
+    if any(data.get(k) for k in ("next", "next_cursor", "nextCursor", "next_page")):
+        return True
+    total = data.get("total")
+    return isinstance(total, int) and total > n
 
 
 def _obj(data: Any) -> JSON:

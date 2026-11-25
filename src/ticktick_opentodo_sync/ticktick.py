@@ -12,6 +12,9 @@ from .models import JSON
 from .opentodo import PLACEHOLDER
 
 BASE_URL = "https://api.ticktick.com"
+PROJECT_PAGE = 200
+"""Lists per ``GET /open/v1/project`` page (the documented default ``limit``)."""
+MAX_PROJECT_PAGES = 50
 
 
 class CiphertextWriteError(ValueError):
@@ -42,7 +45,24 @@ class TickTick:
         return tz if isinstance(tz, str) and tz else None
 
     def projects(self) -> list[JSON]:
-        return _list(self.http.request("GET", "/open/v1/project"))
+        """Every list, a page at a time (``offset``/``limit``, documented default 200).
+
+        A list missing from the answer reads as deleted, and its OpenTodo project is then
+        archived, so a page that can't be continued raises rather than stopping short.
+        """
+        seen: dict[str, JSON] = {}
+        offset = 0
+        for _ in range(MAX_PROJECT_PAGES):
+            params = {"offset": str(offset), "limit": str(PROJECT_PAGE)}
+            page = _list(self.http.request("GET", "/open/v1/project", params=params))
+            new = {str(p["id"]): p for p in page if p.get("id") and str(p["id"]) not in seen}
+            if len(page) == PROJECT_PAGE and not new:
+                raise TypeError("TickTick ignored the list offset: some lists may be missing")
+            seen |= new
+            offset += len(page)
+            if len(page) != PROJECT_PAGE:  # the last page, or limit ignored: everything at once
+                return list(seen.values())
+        raise TypeError(f"more than {MAX_PROJECT_PAGES * PROJECT_PAGE} TickTick lists")
 
     def project_data(self, project_id: str) -> JSON:
         """``{project, tasks, columns}`` (the undone tasks). Anything else raises: read as

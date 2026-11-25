@@ -323,6 +323,64 @@ def test_get_task_answers() -> None:
             tt.get_task("p", "t")
 
 
+def _lists(n: int) -> list[dict[str, str]]:
+    return [{"id": f"l{i}", "name": f"List {i}"} for i in range(n)]
+
+
+@respx.mock
+@pytest.mark.parametrize("total", [3, 200, 250, 401])
+def test_ticktick_lists_are_paged(total: int) -> None:
+    """Lists past the 200th were missing: read as deleted, their projects archived."""
+    lists = _lists(total)
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        offset, limit = (int(request.url.params[k]) for k in ("offset", "limit"))
+        return httpx.Response(200, json=lists[offset : offset + limit])
+
+    route = respx.get(f"{TT}/open/v1/project").mock(side_effect=answer)
+    assert TickTick(http(TT)).projects() == lists
+    assert route.call_count == total // 200 + 1
+
+
+@respx.mock
+def test_ticktick_list_offset_ignored_is_an_error() -> None:
+    respx.get(f"{TT}/open/v1/project").mock(return_value=httpx.Response(200, json=_lists(200)))
+    with pytest.raises(TypeError, match="offset"):
+        TickTick(http(TT)).projects()  # the same 200 again: more may be missing
+
+
+@respx.mock
+def test_ticktick_list_limit_ignored_is_everything() -> None:
+    lists = _lists(250)
+    route = respx.get(f"{TT}/open/v1/project").mock(return_value=httpx.Response(200, json=lists))
+    assert TickTick(http(TT)).projects() == lists
+    assert route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "more",
+    [{"has_more": True}, {"next_cursor": "c2"}, {"next": "/api/v1/projects?p=2"}, {"total": 3}],
+)
+def test_opentodo_listing_that_says_it_is_one_page(more: dict[str, object]) -> None:
+    body = {"projects": [{"id": "p", "name": "x"}]} | more
+    respx.get(f"{OT}/api/v1/projects").mock(return_value=httpx.Response(200, json=body))
+    with pytest.raises(TypeError, match="one page of projects"):
+        OpenTodo(http(OT)).projects()
+
+
+@respx.mock
+def test_opentodo_listing_with_harmless_paging_fields() -> None:
+    body = {
+        "labels": [{"id": "l", "name": "x"}],
+        "total": 1,
+        "next_cursor": None,
+        "has_more": False,
+    }
+    respx.get(f"{OT}/api/v1/labels").mock(return_value=httpx.Response(200, json=body))
+    assert len(OpenTodo(http(OT)).labels()) == 1
+
+
 @respx.mock
 def test_habit_checkins_range_includes_the_last_day() -> None:
     """TickTick's ``to`` is exclusive (seen 2026-11-25: today's check-ins were missing)."""

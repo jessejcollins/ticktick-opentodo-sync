@@ -24,7 +24,7 @@ Base: `https://api.ticktick.com`
 | Purpose | Method + path | Notes |
 |---|---|---|
 | User preferences | `POST /open/v1/preference` | `{"timeZone": "America/Los_Angeles"}`; used as the default zone |
-| List projects | `GET /open/v1/project` | optional `offset`/`limit` (default 200). Project: `id,name,color,sortOrder,closed,groupId,viewMode,permission,kind` (`TASK`/`NOTE`) |
+| List projects | `GET /open/v1/project` | optional `offset` ("zero-based result offset") and `limit` (default 200 when either is given; no maximum stated). A bare array, with nothing to say more exist, and what a call without either parameter returns is undocumented (checked 2026-11-25). The sync pages with `limit=200` until a short page, and fails if a full page brings no new list (offset ignored): a missing list reads as deleted. Project: `id,name,color,sortOrder,closed,groupId,viewMode,permission,kind` (`TASK`/`NOTE`) |
 | Project + tasks | `GET /open/v1/project/{projectId}/data` | `{project, tasks, columns}`. **`tasks` = undone tasks only** (ProjectData definition). An answer that isn't that shape (empty, `[]`, `{}`, an error object) raises rather than reading as "no tasks", which made every paired task in the list look deleted. A missing `tasks` next to `project` or `columns` is read as an empty list (**UNVERIFIED** whether TickTick omits it) |
 | Get task | `GET /open/v1/project/{projectId}/task/{taskId}` | 200 Task / 404 |
 | Create task | `POST /open/v1/task` | `title`, `projectId` required; returns Task |
@@ -99,7 +99,7 @@ Completing a repeating task through the API (`.../complete`) moves it to its nex
 
 | Purpose | Method + path | Notes |
 |---|---|---|
-| List tasks | `GET /api/v1/tasks` | `{tasks:[...]}`: open **and** completed. `?include_deleted=true` adds tombstones (`deleted_at` set). `?project_id=` filters. `completed_after/before` select only completed tasks. No pagination documented |
+| List tasks | `GET /api/v1/tasks` | `{tasks:[...]}`: open **and** completed. `?include_deleted=true` adds tombstones (`deleted_at` set). `?project_id=` filters. `completed_after/before` select only completed tasks. No pagination documented. A listing that says it's one page of several (`has_more`, a `next` link or cursor, a `total` above its count) is refused, for every OpenTodo listing: absent tasks would read as deleted |
 | Get task | `GET /api/v1/tasks/{id}` | |
 | Create task | `POST /api/v1/tasks` | 201 returns task |
 | Update task | `PATCH /api/v1/tasks/{id}` | partial; returns task |

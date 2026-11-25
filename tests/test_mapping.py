@@ -106,6 +106,26 @@ def test_reconcile_projects() -> None:
     assert plan.create_in_tt == [("o2", "Garden")]  # archived is not created
 
 
+def test_reconcile_projects_after_deletions() -> None:
+    tt = {"t1": ProjectInfo("Work", True), "t2": ProjectInfo("Home", True)}
+    tt |= {"t5": ProjectInfo("Shop", True)}
+    ot = {
+        "o1": ProjectInfo("Work", True),
+        "o3": ProjectInfo("Old", True),
+        "o4": ProjectInfo("Done", False),
+        "o5": ProjectInfo("Shop", False),
+    }
+    stored = {"t1": "o1", "t2": "o2", "gone": "o3", "gone2": "o4"}
+    plan = reconcile_projects(stored, tt, ot, trashed={"o2"})
+    assert plan.pairs == {"t1": "o1", "t2": "o2"}
+    assert plan.restore == [("t2", "o2")]  # in OpenTodo's Trash, its list lives: restore
+    assert plan.retire == [("gone", "o3")]  # list deleted in TickTick: archive, don't recreate
+    assert plan.stale == ["gone2"]  # list deleted, project archived already
+    assert plan.create_in_tt == []
+    # A live list never pairs with an archived project of the same name.
+    assert plan.create_in_ot == [("t5", "Shop")] and plan.new_pairs == []
+
+
 def make_mapper() -> Mapper:
     return Mapper(
         default_tz=NY,

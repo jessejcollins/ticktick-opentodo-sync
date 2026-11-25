@@ -104,7 +104,7 @@ Completing a repeating task through the API (`.../complete`) moves it to its nex
 | Update task | `PATCH /api/v1/tasks/{id}` | partial; returns task |
 | Complete / reopen | `PATCH` with `completed_at` | ms timestamp completes; `null` reopens. No dedicated route except for recurring occurrences |
 | Delete task | `DELETE /api/v1/tasks/{id}` | soft delete to Trash (204); `DELETE .../purge` is permanent |
-| Projects | `GET/POST /api/v1/projects`, `GET/PATCH/DELETE /api/v1/projects/{id}` | create: `name, color, parent_id, icon, flow_mode` |
+| Projects | `GET/POST /api/v1/projects`, `GET/PATCH/DELETE /api/v1/projects/{id}` | create: `name, color, parent_id, icon, flow_mode`. Archive: `PATCH {"archived": true}`, sent on its own (other fields with it: 400). `DELETE` is a tombstone (Trash): it leaves the project's tasks alone (`project_id` kept, apps hide them); restore with `PATCH {"deleted_at": null}`. **UNVERIFIED** whether `GET` lists trashed projects (with `deleted_at`); the sync restores them when listed (docs checked 2026-11-25) |
 | Labels | `GET/POST /api/v1/labels`, `.../{id}` | create `{name, color?}`; an existing label with the same name returns 200 |
 | History | `GET /api/v1/tasks/{id}/history` | change sets from the op log |
 | Webhooks | `/api/v1/webhooks` | `task.created/updated/completed/reopened/deleted`, HMAC-signed. Not used: the sync usually runs where the OpenTodo server can't reach it |
@@ -145,7 +145,7 @@ A habit is a repeating task with `habit: true`; each day is an occurrence record
 
 ### Project object
 
-`id, name, color, icon, description, parent_id, position, archived, status, flow_mode, workspace_id, created_at, deleted_at`. There is **no Inbox project object**: the Inbox is `project_id: null`.
+`id, name, color, icon, description, parent_id, position, archived, status, flow_mode, workspace_id, created_at, deleted_at`. `archived` is a boolean; `status` is `active` or `maintenance`, not archive state. There is **no Inbox project object**: the Inbox is `project_id: null`.
 
 ## Field mapping (v1)
 

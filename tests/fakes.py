@@ -257,6 +257,16 @@ class FakeOpenTodo:
         self.projects_[project_id]["name"] = name
         return copy.deepcopy(self.projects_[project_id])
 
+    def archive_project(self, project_id: str) -> JSON:
+        self.writes.append(("archive_project", project_id))
+        self.projects_[project_id]["archived"] = True
+        return copy.deepcopy(self.projects_[project_id])
+
+    def restore_project(self, project_id: str) -> JSON:
+        self.writes.append(("restore_project", project_id))
+        self.projects_[project_id]["deleted_at"] = None
+        return copy.deepcopy(self.projects_[project_id])
+
     def labels(self) -> list[JSON]:
         return [copy.deepcopy(x) for x in self.labels_.values()]
 

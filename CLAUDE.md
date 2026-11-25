@@ -42,7 +42,14 @@ TickTick is primary. For each task pair, keep a record of what each side looked 
 
 **Loop prevention:** after writing to a side, save that side's new hash right away, so the next run doesn't treat the change it just made as a user edit.
 
-**Projects/lists:** TickTick lists map to OpenTodo projects by name. The mapping lives in SQLite. Missing projects are created on the other side. The TickTick Inbox maps to the OpenTodo Inbox (`project_id: null`).
+**Projects/lists:**
+
+- TickTick lists map to OpenTodo projects by name. The mapping lives in SQLite.
+- Missing projects are created on the other side, but a live list never pairs with an archived project.
+- A list deleted in TickTick archives its OpenTodo project, once the project's tasks have gone through the delete rules.
+- A project deleted in OpenTodo is restored from its Trash (TickTick wins), or recreated if it's gone.
+- List and project changes are applied only after the pass's guards.
+- The TickTick Inbox maps to the OpenTodo Inbox (`project_id: null`).
 
 ### Fields
 
@@ -152,6 +159,11 @@ Settled answers from the build. Dates are when they were decided or learned.
   - **Filters ↔ Views:** the Open API has no saved-filter endpoints (only an ad-hoc `/task/filter` query). OpenTodo Views (`/api/v1/views`) would be easy; TickTick is the blocker.
   - **Attachments:** TickTick keeps them as `![file](<id>/<name>)` references in the notes, which already sync as text. The Open API has no attachment routes, and the web app's `/api/v1/attachment/...` answers 401 to the API token. It needs a username/password session, which goes against the token-only decision.
 - **Closed TickTick lists / archived OpenTodo projects** are out of scope. Their tasks are left alone.
+- **Deleted lists and projects** (2026-11-25). Two problems before: a deleted list or project came back (its pair went stale, and the twin on the other side was created again), and `collect()` created lists and projects before the guards ran, so a BLOCKED or REFUSED pass had already written.
+  - **Plan, then apply:** `collect()` only plans list/project changes (`World.projects`). `run()` applies them after the guards, and collects again when lists or projects were created, renamed or restored (at most once).
+  - **List deleted in TickTick:** the OpenTodo project is "retiring". Only its paired tasks are in scope, so they follow the delete rules (bulk-guarded), and new OpenTodo tasks in it are never copied to TickTick. It's archived at the end of the pass, and only after a pass without errors.
+  - **Project deleted in OpenTodo:** a delete is a tombstone that only hides the project's tasks (`project_id` kept). Restoring it (`deleted_at: null`) brings them back. A project gone from the listing altogether is recreated, as before; purging also purges its tasks, which are then deleted in TickTick through the bulk guard.
+  - **Name matching:** a live list never pairs with an archived project, otherwise its tasks would never sync.
 
 ## Git workflow
 

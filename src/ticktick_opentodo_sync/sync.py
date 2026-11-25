@@ -21,6 +21,7 @@ from .mapping import (
     TT_ITEM_DONE,
     Mapper,
     ProjectInfo,
+    ProjectPlan,
     due_from_tt,
     item_from_ot,
     item_from_tt,
@@ -64,6 +65,8 @@ class OpenTodoApi(Protocol):
     def projects(self) -> list[JSON]: ...
     def create_project(self, name: str) -> JSON: ...
     def rename_project(self, project_id: str, name: str) -> JSON: ...
+    def archive_project(self, project_id: str) -> JSON: ...
+    def restore_project(self, project_id: str) -> JSON: ...
     def labels(self) -> list[JSON]: ...
     def create_label(self, name: str) -> JSON: ...
     def tasks(self) -> list[JSON]: ...
@@ -156,6 +159,13 @@ class World:
     ot_records: list[JSON] = field(default_factory=list)
     """Every live OpenTodo occurrence record (``series_id`` set)."""
     ot_project_ids: set[str] = field(default_factory=set)
+    projects: ProjectPlan = field(default_factory=ProjectPlan)
+    """List/project changes: planned by :meth:`Syncer.collect`, applied after the guards."""
+    project_renames: list[tuple[str, str]] = field(default_factory=list)
+    """(OpenTodo project id, name) of paired projects holding the create placeholder."""
+    retiring: set[str] = field(default_factory=set)
+    """Project keys of OpenTodo projects whose TickTick list was deleted: only their paired
+    tasks are in scope (for the delete rules); new ones are never copied to TickTick."""
 
 
 class SyncRefusedError(Exception):
@@ -196,6 +206,8 @@ class Syncer:
         }
         ot_projects: dict[str, ProjectInfo] = {}
         ot_project_ids: set[str] = set()
+        trashed: set[str] = set()
+        renames: list[tuple[str, str]] = []
         habits_project = self.state.get_meta(META_PROJECT)
         names = {
             ot: tt_projects[tt].name
@@ -205,22 +217,30 @@ class Syncer:
         if habits_project:
             names[habits_project] = HABITS_PROJECT
         for p in self.ot.projects():
-            if not p.get("id") or p.get("deleted_at") is not None:
+            if not p.get("id"):
                 continue
-            self._repair_project_name(p, names.get(str(p["id"])), dry_run=dry_run)
-            ot_project_ids.add(str(p["id"]))
-            if str(p["id"]) == habits_project:
+            pid = str(p["id"])
+            if p.get("deleted_at") is not None:
+                trashed.add(pid)
+                continue
+            # A paired project whose name an open browser overwrote with the create
+            # placeholder is renamed back once the guards pass; unreadable until then.
+            repair = names.get(pid) if p.get("name") == PLACEHOLDER else None
+            if repair and not p.get(UNREADABLE):
+                renames.append((pid, repair))
+            ot_project_ids.add(pid)
+            if pid == habits_project:
                 continue  # the habit sync's own project: never a TickTick list
             if _unreadable(p, "name"):
                 # Kept (so a stored pair survives) but inactive: its tasks stay out of scope
                 # and its name is never matched or copied.
-                log.warning("OpenTodo project %s: name unreadable; leaving it alone", p["id"])
-                ot_projects[str(p["id"])] = ProjectInfo(f"<unreadable {p['id']}>", False)
+                if not repair:
+                    log.warning("OpenTodo project %s: name unreadable; leaving it alone", pid)
+                ot_projects[pid] = ProjectInfo(f"<unreadable {pid}>", False)
             else:
-                ot_projects[str(p["id"])] = ProjectInfo(
-                    str(p.get("name") or ""), not p.get("archived")
-                )
-        project_map = self._reconcile_projects(tt_projects, ot_projects, dry_run=dry_run)
+                ot_projects[pid] = ProjectInfo(str(p.get("name") or ""), not p.get("archived"))
+        plan = reconcile_projects(self.state.project_pairs(), tt_projects, ot_projects, trashed)
+        project_map = dict(plan.pairs)
         mapper.tt_to_ot_project = project_map
 
         in_scope = {INBOX}
@@ -246,6 +266,9 @@ class Syncer:
             project_names=names,
             item_pairs={p.tt_id: p for p in self.state.pairs(ITEMS)},
             ot_project_ids=ot_project_ids,
+            projects=plan,
+            project_renames=renames,
+            retiring={PENDING_PREFIX + ot_id for _, ot_id in plan.retire},
         )
         for pair in world.pairs.values():
             mapper.link_task(pair.tt_id, pair.ot_id)
@@ -272,36 +295,35 @@ class Syncer:
             if not dry_run:
                 self.state.update_pair(tt_id, tt_project=str(seen))
 
-    def _repair_project_name(self, p: JSON, name: str | None, *, dry_run: bool) -> None:
-        """Rewrite a paired project whose name an open browser overwrote with the placeholder.
+    # --- lists and projects -------------------------------------------------------------
 
-        ``name``: the TickTick list's name, or the habits project's; None = not paired.
+    def _apply_projects(self, w: World, *, dry_run: bool) -> bool:
+        """Apply the list/project changes :meth:`collect` planned (the guards have passed).
+
+        Returns True when lists or projects were created, renamed or restored: tasks map to
+        them only in a fresh collect. Archiving waits for the end of the pass
+        (:meth:`_retire_projects`).
         """
-        if p.get(UNREADABLE) or p.get("name") != PLACEHOLDER or not name:
-            return
-        log.info(
-            "%srename OpenTodo project %s back to %r (it held the create placeholder)",
-            "would " if dry_run else "",
-            p["id"],
-            name,
-        )
-        if not dry_run:
-            p["name"] = self.ot.rename_project(str(p["id"]), name).get("name")
-
-    def _reconcile_projects(
-        self,
-        tt_projects: dict[str, ProjectInfo],
-        ot_projects: dict[str, ProjectInfo],
-        *,
-        dry_run: bool,
-    ) -> dict[str, str]:
-        plan = reconcile_projects(self.state.project_pairs(), tt_projects, ot_projects)
-        pairs = dict(plan.pairs)
-        verb = "would " if dry_run else ""
-        if not dry_run and (plan.create_in_ot or plan.create_in_tt):
+        plan, verb = w.projects, "would " if dry_run else ""
+        remote = bool(w.project_renames or plan.restore or plan.create_in_ot or plan.create_in_tt)
+        if remote and not dry_run:
             self.state.check_writable()
+        for ot_id, name in w.project_renames:
+            log.info(
+                "%srename OpenTodo project %s back to %r (it held the create placeholder)",
+                verb,
+                ot_id,
+                name,
+            )
+            if not dry_run:
+                self.ot.rename_project(ot_id, name)
+        for tt_id, ot_id in plan.restore:
+            name = w.project_names.get(tt_id, tt_id)
+            log.info("%srestore OpenTodo project %r from the Trash (TickTick wins)", verb, name)
+            if not dry_run:
+                self.ot.restore_project(ot_id)
         for tt_id in plan.stale:
-            log.info("%sforget project pair for vanished list %s", verb, tt_id)
+            log.info("%sforget the project pair of TickTick list %s", verb, tt_id)
             if not dry_run:
                 self.state.drop_project_pair(tt_id)
         for tt_id, ot_id, name in plan.new_pairs:
@@ -312,18 +334,40 @@ class Syncer:
             log.info("%screate OpenTodo project %r", verb, name)
             if not dry_run:
                 created = self.ot.create_project(name)
-                pairs[tt_id] = str(created["id"])
-                ot_projects[pairs[tt_id]] = ProjectInfo(name, True)
-                self.state.add_project_pair(tt_id, pairs[tt_id], name)
+                self.state.add_project_pair(tt_id, str(created["id"]), name)
         for ot_id, name in plan.create_in_tt:
             log.info("%screate TickTick list %r", verb, name)
             if not dry_run:
                 created = self.tt.create_project(name)
-                tt_id = str(created["id"])
-                pairs[tt_id] = ot_id
-                tt_projects[tt_id] = ProjectInfo(name, True)
-                self.state.add_project_pair(tt_id, ot_id, name)
-        return pairs
+                self.state.add_project_pair(str(created["id"]), ot_id, name)
+        if dry_run:
+            for _, ot_id in plan.retire:
+                name = w.project_names.get(PENDING_PREFIX + ot_id, ot_id)
+                log.info("would archive OpenTodo project %r: its TickTick list was deleted", name)
+        return remote and not dry_run
+
+    def _retire_projects(self, w: World, res: PassResult) -> None:
+        """Archive the OpenTodo projects whose TickTick list was deleted; forget the pairs.
+
+        Only after a pass without errors: their paired tasks must have gone through the
+        delete rules first, as an archived project's tasks are out of scope for good.
+        """
+        if not w.projects.retire:
+            return
+        if res.errors:
+            log.warning(
+                "archiving the OpenTodo project(s) of deleted TickTick lists waits for a pass "
+                "without errors"
+            )
+            return
+        self.state.check_writable()
+        for tt_id, ot_id in w.projects.retire:
+            self.ot.archive_project(ot_id)
+            self.state.drop_project_pair(tt_id)
+            log.info(
+                "archived OpenTodo project %r: its TickTick list was deleted",
+                w.project_names.get(PENDING_PREFIX + ot_id, ot_id),
+            )
 
     def _collect_tt(
         self, w: World, project_ids: list[str], in_scope: set[str], dry_run: bool
@@ -419,7 +463,11 @@ class Syncer:
                 continue
             w.ot_raw[oid] = raw
             task = self._normalize(w.mapper.from_ot, raw, "OpenTodo", oid)
-            if task is None or task.project not in in_scope:
+            if (
+                task is None
+                or task.project not in in_scope
+                or (task.project in w.retiring and oid not in paired)
+            ):
                 w.ot.out_of_scope.add(oid)
             else:
                 w.ot.tasks[oid] = task
@@ -476,7 +524,12 @@ class Syncer:
                 continue
             w.ot_raw[oid] = raw
             task = self._normalize(w.mapper.from_ot, raw, "OpenTodo", oid)
-            if task is None or task.project not in in_scope or parent_tt not in w.tt.tasks:
+            if (
+                task is None
+                or task.project not in in_scope
+                or parent_tt not in w.tt.tasks
+                or (task.project in w.retiring and oid not in task_ot_ids)
+            ):
                 w.ot.out_of_scope.add(oid)
             else:
                 w.ot.tasks[oid] = task
@@ -528,51 +581,25 @@ class Syncer:
     def run(self, *, dry_run: bool, allow_bulk: bool = False) -> PassResult:
         res = PassResult(dry_run=dry_run)
         w = self.collect(dry_run=dry_run)
-
-        if self.state.pair_count() == 0 and not self.state.get_meta("matched_existing"):
-            open_ot = sum(not t.completed for t in w.ot.tasks.values())
-            if open_ot:
-                res.refused = (
-                    f"no task pairs yet but OpenTodo already has {open_ot} open task(s); "
-                    "syncing now would duplicate them. "
-                    "Empty OpenTodo or run --match-existing first."
-                )
-                log.error("%s", res.refused)
-                if not dry_run:
-                    return res
-
-        actions = self._mark_tt_occurrences(engine.plan(w.pairs.values(), w.tt, w.ot), w)
-        # Parents before their subtasks, so a new subtask's parent exists when it is created.
-        actions.sort(key=lambda a: a.task is not None and a.task.parent is not None)
-        item_actions = self._plan_items(w, actions)
-        # Item deletions in TickTick (the source of truth) count; OpenTodo's copies don't.
-        n_destructive = engine.destructive_count(actions) + sum(
-            a.kind is Kind.DELETE_TT for a in item_actions
-        )
-        if n_destructive > self.max_destructive and not allow_bulk:
-            res.blocked = (
-                f"{n_destructive} deletes/completions exceed "
-                f"TICKTICK_OPENTODO_SYNC_MAX_DESTRUCTIVE={self.max_destructive}; "
-                "nothing written. Review, then run once with --allow-bulk."
-            )
-            log.warning("%s", res.blocked)
-            for a in actions:
-                if a.destructive:
-                    log.warning("  blocked: %s", self._describe(a, w))
-            for a in item_actions:
-                if a.kind is Kind.DELETE_TT:
-                    log.warning("  blocked: %s", self._describe_item(a, w))
-            if not dry_run:
-                self.state.set_meta_json(
-                    "blocked", {"at": self.now_ms(), "count": n_destructive, "reason": res.blocked}
-                )
+        planned = self._plan_pass(w, res, dry_run=dry_run, allow_bulk=allow_bulk)
+        # Lists and projects change only once the guards have passed. Created, renamed or
+        # restored ones change what tasks map to, so the pass then starts over (once).
+        if planned is not None and self._apply_projects(w, dry_run=dry_run):
+            w = self.collect(dry_run=dry_run)
+            planned = self._plan_pass(w, res, dry_run=dry_run, allow_bulk=allow_bulk)
+            if planned is not None:
+                self._apply_projects(w, dry_run=dry_run)  # normally nothing left to do
+        if planned is None:
             return res
+        actions, item_actions = planned
 
         if not dry_run and (actions or item_actions):
             self.state.check_writable()
         for a in actions:
             self._apply(a, w, res, dry_run=dry_run)
         self._apply_items(item_actions, w, res, dry_run=dry_run)
+        if not dry_run:
+            self._retire_projects(w, res)
         try:
             HabitSync(
                 self.tt,
@@ -604,6 +631,50 @@ class Syncer:
             if res.changed or res.errors:
                 self.state.set_meta_json("last_change", {"at": self.now_ms()} | res.to_json())
         return res
+
+    def _plan_pass(
+        self, w: World, res: PassResult, *, dry_run: bool, allow_bulk: bool
+    ) -> tuple[list[Action], list[Action]] | None:
+        """Task and checklist-item actions, or None when a guard stops the pass."""
+        if self.state.pair_count() == 0 and not self.state.get_meta("matched_existing"):
+            open_ot = sum(not t.completed for t in w.ot.tasks.values())
+            if open_ot:
+                res.refused = (
+                    f"no task pairs yet but OpenTodo already has {open_ot} open task(s); "
+                    "syncing now would duplicate them. "
+                    "Empty OpenTodo or run --match-existing first."
+                )
+                log.error("%s", res.refused)
+                if not dry_run:
+                    return None
+
+        actions = self._mark_tt_occurrences(engine.plan(w.pairs.values(), w.tt, w.ot), w)
+        # Parents before their subtasks, so a new subtask's parent exists when it is created.
+        actions.sort(key=lambda a: a.task is not None and a.task.parent is not None)
+        item_actions = self._plan_items(w, actions)
+        # Item deletions in TickTick (the source of truth) count; OpenTodo's copies don't.
+        n_destructive = engine.destructive_count(actions) + sum(
+            a.kind is Kind.DELETE_TT for a in item_actions
+        )
+        if n_destructive > self.max_destructive and not allow_bulk:
+            res.blocked = (
+                f"{n_destructive} deletes/completions exceed "
+                f"TICKTICK_OPENTODO_SYNC_MAX_DESTRUCTIVE={self.max_destructive}; "
+                "nothing written. Review, then run once with --allow-bulk."
+            )
+            log.warning("%s", res.blocked)
+            for a in actions:
+                if a.destructive:
+                    log.warning("  blocked: %s", self._describe(a, w))
+            for a in item_actions:
+                if a.kind is Kind.DELETE_TT:
+                    log.warning("  blocked: %s", self._describe_item(a, w))
+            if not dry_run:
+                self.state.set_meta_json(
+                    "blocked", {"at": self.now_ms(), "count": n_destructive, "reason": res.blocked}
+                )
+            return None
+        return actions, item_actions
 
     def _mark_tt_occurrences(self, actions: list[Action], w: World) -> list[Action]:
         """Tell a repeating task completed in TickTick from one that was only moved.

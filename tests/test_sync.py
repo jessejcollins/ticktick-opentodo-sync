@@ -122,6 +122,80 @@ def test_new_opentodo_project_is_created_in_ticktick(env: Env) -> None:
     env.assert_quiet()
 
 
+def _delete_list(env: Env, n_tasks: int) -> str:
+    """A synced TickTick list "Work" with ``n_tasks`` tasks, then deleted (with its tasks)."""
+    work = env.tt.add_project("Work")
+    tids = [env.tt.add_task(f"task {i}", work) for i in range(n_tasks)]
+    env.run()
+    del env.tt.projects_[work]
+    for tid in tids:
+        del env.tt.tasks[tid]
+    return next(iter(env.ot.projects_))
+
+
+def test_list_deleted_in_ticktick_archives_its_project(env: Env) -> None:
+    """It used to come back: the OpenTodo project, now unpaired, was created as a new list."""
+    otp = _delete_list(env, 2)
+    env.ot.add_task("Draft", otp)  # added in OpenTodo since the last pass
+    res = env.run()
+    assert res.ok and res.ot.deleted == 2 and not res.tt.created, res.summary()
+    assert env.ot.projects_[otp]["archived"] is True
+    assert env.state.project_pairs() == {}
+    assert not env.tt.projects_  # not recreated
+    assert env.ot_by_title("Draft")["deleted_at"] is None  # left in the archived project
+    env.assert_quiet()
+
+
+def test_blocked_pass_writes_no_list_or_project_either(env: Env) -> None:
+    """Lists and projects were created while collecting, before the guards ran."""
+    otp = _delete_list(env, 12)
+    writes = (len(env.tt.writes), len(env.ot.writes))
+    res = env.run()
+    assert res.blocked
+    assert (len(env.tt.writes), len(env.ot.writes)) == writes
+    res = env.run(allow_bulk=True)
+    assert res.ok and res.ot.deleted == 12, res.summary()
+    assert env.ot.projects_[otp]["archived"] is True and not env.tt.projects_
+    env.assert_quiet()
+
+
+def test_project_deleted_in_opentodo_is_restored(env: Env) -> None:
+    """Deleting a project in OpenTodo only hides its tasks: TickTick wins, it comes back."""
+    seed(env)
+    otp = next(iter(env.ot.projects_))
+    env.ot.projects_[otp]["deleted_at"] = 1
+    res = env.run()
+    assert res.ok and not res.tt.deleted and not res.ot.created, res.summary()
+    assert env.ot.projects_[otp]["deleted_at"] is None
+    assert env.ot_by_title("Report")["project_id"] == otp
+    env.assert_quiet()
+
+
+def test_project_purged_in_opentodo_is_recreated(env: Env) -> None:
+    """Purging also purges its tasks: deleted in TickTick (bulk-guarded), the list stays."""
+    seed(env)
+    otp = next(iter(env.ot.projects_))
+    del env.ot.projects_[otp]
+    env.ot.tasks_ = {k: t for k, t in env.ot.tasks_.items() if t["project_id"] != otp}
+    res = env.run()
+    assert res.ok and res.tt.deleted == 1, res.summary()
+    assert [p["name"] for p in env.ot.projects_.values()] == ["Work"]
+    assert [p["name"] for p in env.tt.projects_.values()] == ["Work"]
+    env.assert_quiet()
+
+
+def test_new_list_never_pairs_with_an_archived_project(env: Env) -> None:
+    """Its tasks would never sync: an archived project is out of scope."""
+    old = env.ot.add_project("Groceries", archived=True)
+    env.tt.add_task("milk", env.tt.add_project("Groceries"))
+    env.run()
+    milk = env.ot_by_title("milk")
+    assert milk["project_id"] != old
+    assert env.ot.projects_[milk["project_id"]]["name"] == "Groceries"
+    assert env.ot.projects_[old]["archived"] is True
+    env.assert_quiet()
+
+
 def test_edit_in_opentodo_pushes_to_ticktick(env: Env) -> None:
     _, b = seed(env)
     env.ot_by_title("Report")["title"] = "Report v2"
@@ -289,8 +363,9 @@ def test_bulk_guard_blocks_then_allow_bulk(env: Env) -> None:
 
 
 def test_first_sync_refuses_when_opentodo_has_open_tasks(env: Env) -> None:
-    env.tt.add_task("tt")
-    env.ot.add_task("leftover from import")
+    """Nothing at all is written, lists and projects included (they used to be)."""
+    env.tt.add_task("tt", env.tt.add_project("Work"))
+    env.ot.add_task("leftover from import", env.ot.add_project("Old"))
     res = env.run()
     assert res.refused and env.ot.writes == [] and env.tt.writes == []
 

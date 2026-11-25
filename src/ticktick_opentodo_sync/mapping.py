@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
 from functools import cache
@@ -257,11 +258,19 @@ class ProjectInfo:
 @dataclass
 class ProjectPlan:
     pairs: dict[str, str] = field(default_factory=dict)
-    """tt_id -> ot_id, including new name matches."""
+    """tt_id -> ot_id, including new name matches and projects being restored."""
     new_pairs: list[tuple[str, str, str]] = field(default_factory=list)
     """(tt_id, ot_id, name) matched by name this run; persist them."""
     stale: list[str] = field(default_factory=list)
-    """tt_ids of stored pairs whose project vanished on either side."""
+    """tt_ids of stored pairs to forget now: the OpenTodo project is gone (the TickTick list
+    is then matched or created again: TickTick wins), or both are, or the list is gone and
+    its project is inactive already."""
+    retire: list[tuple[str, str]] = field(default_factory=list)
+    """(tt_id, ot_id): the TickTick list was deleted. Its active OpenTodo project is archived
+    once its tasks went through the delete rules, never recreated as a list."""
+    restore: list[tuple[str, str]] = field(default_factory=list)
+    """(tt_id, ot_id): the project is in OpenTodo's Trash while its list lives. Deleting a
+    project only hides its tasks, so restoring it brings them back (TickTick wins)."""
     create_in_ot: list[tuple[str, str]] = field(default_factory=list)
     """(tt_id, name)."""
     create_in_tt: list[tuple[str, str]] = field(default_factory=list)
@@ -272,30 +281,49 @@ def reconcile_projects(
     stored: Mapping[str, str],
     tt: Mapping[str, ProjectInfo],
     ot: Mapping[str, ProjectInfo],
+    trashed: AbstractSet[str] = frozenset(),
 ) -> ProjectPlan:
+    """Pair lists and projects: by id once paired, by name otherwise.
+
+    ``trashed``: ids of OpenTodo projects listed with ``deleted_at`` set (not in ``ot``).
+    """
     plan = ProjectPlan()
+    retired: set[str] = set()
     for tt_id, ot_id in stored.items():
         if tt_id in tt and ot_id in ot:
             plan.pairs[tt_id] = ot_id
+        elif tt_id in tt and ot_id in trashed:
+            plan.pairs[tt_id] = ot_id
+            plan.restore.append((tt_id, ot_id))
+        elif tt_id not in tt and ot_id in ot and ot[ot_id].active:
+            plan.retire.append((tt_id, ot_id))
+            retired.add(ot_id)
         else:
             plan.stale.append(tt_id)
 
-    paired_ot = set(plan.pairs.values())
+    taken = set(plan.pairs.values()) | retired
     ot_by_name: dict[str, str] = {}
-    for ot_id, info in sorted(ot.items(), key=lambda kv: kv[1].name):
-        if ot_id in paired_ot:
+    # Active projects first: a name an archived project shares goes to the active one.
+    for ot_id, info in sorted(ot.items(), key=lambda kv: (not kv[1].active, kv[1].name)):
+        if ot_id in taken:
             continue
         key = info.name.strip().casefold()
         if key in ot_by_name:
-            log.warning("duplicate OpenTodo project name %r; matching only the first", info.name)
+            if info.active:
+                log.warning(
+                    "duplicate OpenTodo project name %r; matching only the first", info.name
+                )
             continue
         ot_by_name[key] = ot_id
 
     for tt_id, info in sorted(tt.items(), key=lambda kv: kv[1].name):
         if tt_id in plan.pairs:
             continue
-        match = ot_by_name.pop(info.name.strip().casefold(), "")
-        if match:
+        key = info.name.strip().casefold()
+        match = ot_by_name.get(key)
+        # A live list never pairs with an archived project: its tasks would never sync.
+        if match is not None and (ot[match].active or not info.active):
+            del ot_by_name[key]
             plan.pairs[tt_id] = match
             plan.new_pairs.append((tt_id, match, info.name))
         elif info.active:

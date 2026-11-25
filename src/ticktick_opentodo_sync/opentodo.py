@@ -210,6 +210,18 @@ class OpenTodo:
         resp = self.http.request("PATCH", f"/api/v1/projects/{project_id}", json=sealed)
         return self._open("project", _obj(resp), NAME_CONTENT)
 
+    def archive_project(self, project_id: str) -> JSON:
+        """Archive a project (with its sub-projects). ``archived`` must be sent on its own."""
+        resp = self.http.request("PATCH", f"/api/v1/projects/{project_id}", json={"archived": True})
+        return self._open("project", _obj(resp), NAME_CONTENT)
+
+    def restore_project(self, project_id: str) -> JSON:
+        """Bring a project back from the Trash; its tasks, only hidden, come back with it."""
+        resp = self.http.request(
+            "PATCH", f"/api/v1/projects/{project_id}", json={"deleted_at": None}
+        )
+        return self._open("project", _obj(resp), NAME_CONTENT)
+
     def labels(self) -> list[JSON]:
         items = _items(self.http.request("GET", "/api/v1/labels"), "labels")
         return [self._open("label", x, NAME_CONTENT) for x in items]

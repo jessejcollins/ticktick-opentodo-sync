@@ -202,3 +202,14 @@ def test_odd_responses_never_read_as_nothing(body: object) -> None:
     if not isinstance(body, list):  # a list is TickTick's normal shape
         with pytest.raises(TypeError):
             TickTick(http(TT)).projects()
+
+
+@respx.mock
+def test_habit_checkins_range_includes_the_last_day() -> None:
+    """TickTick's ``to`` is exclusive (seen 2026-11-25: today's check-ins were missing)."""
+    route = respx.get(f"{TT}/open/v1/habit/checkins").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    TickTick(http(TT)).habit_checkins(["h1", "h2"], 20261126, 20261231)
+    params = route.calls[0].request.url.params
+    assert (params["habitIds"], params["from"], params["to"]) == ("h1,h2", "20261126", "20270101")

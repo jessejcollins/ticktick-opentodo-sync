@@ -79,7 +79,7 @@ Completing a repeating task through the API (`.../complete`) moves it to its nex
 
 ### Habits
 
-`GET /open/v1/habit` (all habits; `status` 0 = in use), `GET /open/v1/habit/sections` (built-in `_morning`, `_afternoon`, `_night`), `POST /open/v1/habit` (create), `POST /open/v1/habit/{id}` (update; only the fields sent), no delete. `GET /open/v1/habit/checkins?habitIds=a,b&from=YYYYMMDD&to=YYYYMMDD` returns `[{habitId, checkins: [{stamp, status, value, goal, time, opTime}]}]`; `POST /open/v1/habit/{id}/checkin` `{stamp, status, value, goal, time, opTime}` creates or updates that day. Check-in `status`: 0 unmarked, 1 not completed, 2 completed (from the TickTick connector's tool schema). Typical habit: `type` `Boolean`, `goal` 1, rule `RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=SU,MO,TU,WE,TH,FR,SA`, reminders as `"HH:MM"` strings.
+`GET /open/v1/habit` (all habits; `status` 0 = in use), `GET /open/v1/habit/sections` (built-in `_morning`, `_afternoon`, `_night`), `POST /open/v1/habit` (create), `POST /open/v1/habit/{id}` (update; only the fields sent), no delete. `GET /open/v1/habit/checkins?habitIds=a,b&from=YYYYMMDD&to=YYYYMMDD` (`from` inclusive, **`to` exclusive**: `from=20261124&to=20261124` returns nothing, seen 2026-11-25) returns `[{habitId, checkins: [{stamp, status, value, goal, time, opTime}]}]`; `POST /open/v1/habit/{id}/checkin` `{stamp, status, value, goal, time, opTime}` creates or updates that day. Check-in `status`: 0 unmarked, 1 not completed, 2 completed (from the TickTick connector's tool schema). Typical habit: `type` `Boolean`, `goal` 1, rule `RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=SU,MO,TU,WE,TH,FR,SA`, reminders as `"HH:MM"` strings.
 
 ## OpenTodo REST API
 

@@ -231,6 +231,11 @@ class FakeOpenTodo:
         self.writes.append(("create_project", name))
         return copy.deepcopy(self.projects_[self.add_project(name)])
 
+    def rename_project(self, project_id: str, name: str) -> JSON:
+        self.writes.append(("rename_project", name))
+        self.projects_[project_id]["name"] = name
+        return copy.deepcopy(self.projects_[project_id])
+
     def labels(self) -> list[JSON]:
         return [copy.deepcopy(x) for x in self.labels_.values()]
 

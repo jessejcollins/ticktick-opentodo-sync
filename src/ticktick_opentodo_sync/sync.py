@@ -12,7 +12,7 @@ from typing import Any, Protocol
 
 from . import engine, recurrence
 from .engine import Action, Kind, Pair, Snapshot
-from .habit_sync import META_PROJECT, HabitSync
+from .habit_sync import HABITS_PROJECT, META_PROJECT, HabitSync
 from .http import ApiError
 from .mapping import (
     TT_DONE,
@@ -62,6 +62,7 @@ class OpenTodoApi(Protocol):
     def begin_pass(self) -> None: ...
     def projects(self) -> list[JSON]: ...
     def create_project(self, name: str) -> JSON: ...
+    def rename_project(self, project_id: str, name: str) -> JSON: ...
     def labels(self) -> list[JSON]: ...
     def create_label(self, name: str) -> JSON: ...
     def tasks(self) -> list[JSON]: ...
@@ -195,9 +196,17 @@ class Syncer:
         ot_projects: dict[str, ProjectInfo] = {}
         ot_project_ids: set[str] = set()
         habits_project = self.state.get_meta(META_PROJECT)
+        names = {
+            ot: tt_projects[tt].name
+            for tt, ot in self.state.project_pairs().items()
+            if tt in tt_projects
+        }
+        if habits_project:
+            names[habits_project] = HABITS_PROJECT
         for p in self.ot.projects():
             if not p.get("id") or p.get("deleted_at") is not None:
                 continue
+            self._repair_project_name(p, names.get(str(p["id"])), dry_run=dry_run)
             ot_project_ids.add(str(p["id"]))
             if str(p["id"]) == habits_project:
                 continue  # the habit sync's own project: never a TickTick list
@@ -244,6 +253,22 @@ class Syncer:
         self._resolve_missing_tt(world, in_scope)
         self._collect_subtasks(world, children, in_scope)
         return world
+
+    def _repair_project_name(self, p: JSON, name: str | None, *, dry_run: bool) -> None:
+        """Rewrite a paired project whose name an open browser overwrote with the placeholder.
+
+        ``name``: the TickTick list's name, or the habits project's; None = not paired.
+        """
+        if p.get(UNREADABLE) or p.get("name") != PLACEHOLDER or not name:
+            return
+        log.info(
+            "%srename OpenTodo project %s back to %r (it held the create placeholder)",
+            "would " if dry_run else "",
+            p["id"],
+            name,
+        )
+        if not dry_run:
+            p["name"] = self.ot.rename_project(str(p["id"]), name).get("name")
 
     def _reconcile_projects(
         self,

@@ -169,6 +169,11 @@ class OpenTodo:
     def create_project(self, name: str) -> JSON:
         return self._create_sealed("project", "projects", {"name": name}, NAME_CONTENT)
 
+    def rename_project(self, project_id: str, name: str) -> JSON:
+        sealed = self._seal("project", project_id, {"name": name}, NAME_CONTENT)
+        resp = self.http.request("PATCH", f"/api/v1/projects/{project_id}", json=sealed)
+        return self._open("project", _obj(resp), NAME_CONTENT)
+
     def labels(self) -> list[JSON]:
         items = _items(self.http.request("GET", "/api/v1/labels"), "labels")
         return [self._open("label", x, NAME_CONTENT) for x in items]

@@ -227,7 +227,7 @@ With encryption on, OpenTodo's server only holds ciphertext for task titles and 
 - **Values that don't decrypt** keep their task, project or label out of the sync, with a warning. They're never mistaken for an edit or a deletion.
 - **Safety checks:**
   - The TickTick client refuses to write any encrypted value.
-  - If a browser tab open on OpenTodo overwrites a just-created task or habit with the sync's temporary placeholder, the next pass puts the content back from TickTick.
+  - If a browser tab open on OpenTodo overwrites a just-created task, habit or project with the sync's temporary placeholder, the next pass puts the content back from TickTick.
 
 ## Pairing tasks that already exist
 

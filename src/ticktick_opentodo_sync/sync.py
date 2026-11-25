@@ -172,6 +172,10 @@ class SyncRefusedError(Exception):
     pass
 
 
+class ChangedDuringPassError(Exception):
+    """The target changed after the pass read it: writing now would undo that change."""
+
+
 class Syncer:
     def __init__(
         self,
@@ -846,6 +850,10 @@ class Syncer:
             # The state couldn't record what was just written: stop the whole pass. Carrying
             # on would make more writes that can't be recorded either.
             raise
+        except ChangedDuringPassError as exc:
+            # Nothing written, nothing recorded: the next pass plans it again with the edit.
+            log.info("left for the next pass: %s (%s)", desc, exc)
+            return
         except Exception as exc:
             res.errors += 1
             log.error("failed to %s: %s", desc, exc)  # noqa: TRY400
@@ -937,9 +945,15 @@ class Syncer:
     def _update_tt(self, a: Action, w: World) -> None:
         assert a.tt_id and a.task
         pair = w.pairs[a.tt_id]
-        raw = w.tt_raw.get(a.tt_id) or self.tt.get_task(pair.tt_project, a.tt_id)
+        # Read again: the write sends the whole task back, checklist included. Built on the
+        # copy from the start of the pass, it undid anything changed in TickTick since then.
+        collected = w.tt_raw.get(a.tt_id)
+        project = str((collected or {}).get("projectId") or pair.tt_project)
+        raw = self.tt.get_task(project, a.tt_id)
         if raw is None:
             raise RuntimeError("TickTick task no longer exists")
+        if collected is not None and _tt_view(w, raw) != _tt_view(w, collected):
+            raise ChangedDuringPassError("changed in TickTick since this pass read it")
         target = w.mapper.tt_project_id(a.task.project)
         if raw.get("projectId") != target:
             self.tt.move_task(a.tt_id, str(raw.get("projectId") or pair.tt_project), target)
@@ -1326,6 +1340,19 @@ def _count(a: Action, res: PassResult) -> None:
         side.completed += a.completes
     elif a.kind in (Kind.DELETE_OT, Kind.DELETE_TT):
         side.deleted += 1
+
+
+def _tt_view(w: World, raw: JSON) -> tuple[Task, list[tuple[str, str, object]]]:
+    """What a whole-task TickTick write would overwrite: the synced content and the checklist.
+
+    Normalized, so the list and single-task endpoints compare equal when nothing changed.
+    """
+    items = [
+        (str(i.get("id")), str(i.get("title") or ""), i.get("status"))
+        for i in raw.get("items") or []
+        if isinstance(i, dict)
+    ]
+    return w.mapper.from_tt(raw), sorted(items, key=lambda i: i[0])
 
 
 def _completable_rule(rule: str | None) -> bool:

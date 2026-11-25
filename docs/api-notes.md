@@ -28,7 +28,7 @@ Base: `https://api.ticktick.com`
 | Project + tasks | `GET /open/v1/project/{projectId}/data` | `{project, tasks, columns}`. **`tasks` = undone tasks only** (ProjectData definition). An answer that isn't that shape (empty, `[]`, `{}`, an error object) raises rather than reading as "no tasks", which made every paired task in the list look deleted. A missing `tasks` next to `project` or `columns` is read as an empty list (**UNVERIFIED** whether TickTick omits it) |
 | Get task | `GET /open/v1/project/{projectId}/task/{taskId}` | 200 Task / 404 |
 | Create task | `POST /open/v1/task` | `title`, `projectId` required; returns Task |
-| Update task | `POST /open/v1/task/{taskId}` | body must include `id`, `projectId`. **UNVERIFIED** whether omitted fields are cleared, so ticktick-opentodo-sync sends the full merged task |
+| Update task | `POST /open/v1/task/{taskId}` | body must include `id`, `projectId`. **UNVERIFIED** whether omitted fields are cleared, so ticktick-opentodo-sync sends the full merged task. It reads the task again right before writing and merges over that copy. If the synced fields or the checklist changed since the pass read the task, the write waits for the next pass, because it would undo the change (2026-11-25) |
 | Complete task | `POST /open/v1/project/{projectId}/task/{taskId}/complete` | no body, no content |
 | Delete task | `DELETE /open/v1/project/{projectId}/task/{taskId}` | |
 | Move task | `POST /open/v1/task/move` | body: array of `{fromProjectId,toProjectId,taskId}`; returns `[{id, etag}]` |

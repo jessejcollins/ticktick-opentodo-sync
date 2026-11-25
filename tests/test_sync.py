@@ -582,6 +582,32 @@ def tt_items(env: Env, tid: str) -> dict[str, dict[str, Any]]:
     return {str(i["title"]): i for i in env.tt.tasks[tid]["items"]}
 
 
+def test_whole_task_write_keeps_a_tick_made_during_the_pass(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write was built on the copy read at the start of the pass, checklist included: a
+    tick made in TickTick meanwhile was undone."""
+    tid = _checklist(env)
+    env.ot_by_title("Pack")["due"] = {"date": "2026-12-01"}  # edited in OpenTodo
+    check_writable = State.check_writable
+
+    def ticked_meanwhile(state: State) -> None:
+        # Runs once the pass has read both apps, just before it writes.
+        tt_items(env, tid)["Socks"]["status"] = 1  # ticked in TickTick meanwhile
+        check_writable(state)
+
+    monkeypatch.setattr(State, "check_writable", ticked_meanwhile)
+    res = env.run()
+    assert res.ok and not res.tt.updated, res.summary()  # left for the next pass
+    assert tt_items(env, tid)["Socks"]["status"] == 1
+    monkeypatch.undo()
+    res = env.run()
+    assert res.tt.updated == 1, res.summary()
+    assert env.tt.tasks[tid]["dueDate"] and tt_items(env, tid)["Socks"]["status"] == 1
+    assert subtasks(env, "Pack")["Socks"]["completed_at"] is not None
+    env.assert_quiet()
+
+
 def test_checklist_items_become_subtasks(env: Env) -> None:
     _checklist(env)
     subs = subtasks(env, "Pack")

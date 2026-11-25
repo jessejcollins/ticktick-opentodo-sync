@@ -45,14 +45,34 @@ class TickTick:
         return _list(self.http.request("GET", "/open/v1/project"))
 
     def project_data(self, project_id: str) -> JSON:
+        """``{project, tasks, columns}`` (the undone tasks). Anything else raises: read as
+        "no tasks", an odd answer made every paired task in the list look deleted."""
         data = self.http.request("GET", f"/open/v1/project/{project_id}/data")
-        return cast(JSON, data) if isinstance(data, dict) else {}
+        if isinstance(data, dict):
+            tasks = data.get("tasks")
+            if isinstance(tasks, list):
+                return cast(JSON, data)
+            # A list without tasks may come without the field (UNVERIFIED); an answer with
+            # none of the fields (an error object, {}) is no answer at all.
+            if tasks is None and ("project" in data or "columns" in data):
+                return cast(JSON, data)
+        raise TypeError(f"unexpected TickTick response for list {project_id}: {_shape(data)}")
 
     def get_task(self, project_id: str, task_id: str) -> JSON | None:
+        """The task, or None when it's gone: a 404, or an empty answer.
+
+        UNVERIFIED whether TickTick answers a deleted task with an empty 200 rather than a
+        404 (docs/api-notes.md), so that still reads as gone. Any other answer that isn't
+        this task raises instead of reading as "deleted".
+        """
         data = self.http.request(
             "GET", f"/open/v1/project/{project_id}/task/{task_id}", not_found_ok=True
         )
-        return cast(JSON, data) if isinstance(data, dict) and data else None
+        if data is None or data == {}:
+            return None
+        if isinstance(data, dict) and str(data.get("id")) == task_id:
+            return cast(JSON, data)
+        raise TypeError(f"unexpected TickTick response for task {task_id}: {_shape(data)}")
 
     def create_task(self, body: JSON) -> JSON:
         refuse_ciphertext(body)
@@ -135,3 +155,10 @@ def _list(data: Any) -> list[JSON]:
 
 def _obj(data: Any) -> JSON:
     return cast(JSON, data) if isinstance(data, dict) else {}
+
+
+def _shape(data: Any) -> str:
+    """A response's shape for an error message, without its content."""
+    if isinstance(data, dict):
+        return f"an object with keys {sorted(map(str, data))[:8]}"
+    return "an empty answer" if data is None else type(data).__name__

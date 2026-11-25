@@ -25,7 +25,7 @@ Base: `https://api.ticktick.com`
 |---|---|---|
 | User preferences | `POST /open/v1/preference` | `{"timeZone": "America/Los_Angeles"}`; used as the default zone |
 | List projects | `GET /open/v1/project` | optional `offset`/`limit` (default 200). Project: `id,name,color,sortOrder,closed,groupId,viewMode,permission,kind` (`TASK`/`NOTE`) |
-| Project + tasks | `GET /open/v1/project/{projectId}/data` | `{project, tasks, columns}`. **`tasks` = undone tasks only** (ProjectData definition) |
+| Project + tasks | `GET /open/v1/project/{projectId}/data` | `{project, tasks, columns}`. **`tasks` = undone tasks only** (ProjectData definition). An answer that isn't that shape (empty, `[]`, `{}`, an error object) raises rather than reading as "no tasks", which made every paired task in the list look deleted. A missing `tasks` next to `project` or `columns` is read as an empty list (**UNVERIFIED** whether TickTick omits it) |
 | Get task | `GET /open/v1/project/{projectId}/task/{taskId}` | 200 Task / 404 |
 | Create task | `POST /open/v1/task` | `title`, `projectId` required; returns Task |
 | Update task | `POST /open/v1/task/{taskId}` | body must include `id`, `projectId`. **UNVERIFIED** whether omitted fields are cleared, so ticktick-opentodo-sync sends the full merged task |
@@ -59,6 +59,7 @@ Base: `https://api.ticktick.com`
 
 - Project data returns only undone tasks. When a paired, previously open task disappears, ticktick-opentodo-sync calls `GET .../task/{id}`:
   - `404` → deleted.
+  - An empty `200` (no body, or `{}`) → deleted (**UNVERIFIED** whether TickTick answers that way; kept so a deletion isn't missed). Any other answer that isn't the task (a list, an error object, another id) raises.
   - Task with `deleted` truthy → deleted (**UNVERIFIED** field, handled in case trashed tasks are still returned).
   - `status` `2` or `-1` → completed.
   - `status` `0` → still open but out of scope (moved to a closed list or turned into a subtask). Left alone.

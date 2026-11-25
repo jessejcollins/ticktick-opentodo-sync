@@ -205,6 +205,48 @@ def test_odd_responses_never_read_as_nothing(body: object) -> None:
 
 
 @respx.mock
+@pytest.mark.parametrize("body", [None, [], {}, {"errorCode": "x", "errorMessage": "y"}])
+def test_odd_list_data_is_an_error_not_an_empty_list(body: object) -> None:
+    """Read as "no tasks", every paired task in the list looked deleted (review #6)."""
+    content = b"" if body is None else json.dumps(body).encode()
+    respx.get(f"{TT}/open/v1/project/p/data").mock(
+        return_value=httpx.Response(200, content=content)
+    )
+    with pytest.raises(TypeError, match="list p"):
+        TickTick(http(TT)).project_data("p")
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"project": {"id": "p"}, "tasks": [], "columns": []},
+        {"tasks": [{"id": "t"}]},
+        {"project": {"id": "p"}, "columns": []},  # an empty list without "tasks"
+    ],
+)
+def test_list_data(body: dict[str, object]) -> None:
+    respx.get(f"{TT}/open/v1/project/p/data").mock(return_value=httpx.Response(200, json=body))
+    assert TickTick(http(TT)).project_data("p") == body
+
+
+@respx.mock
+def test_get_task_answers() -> None:
+    tt = TickTick(http(TT))
+    route = respx.get(f"{TT}/open/v1/project/p/task/t")
+    route.mock(return_value=httpx.Response(200, json={"id": "t", "status": 2}))
+    assert tt.get_task("p", "t") == {"id": "t", "status": 2}
+    for gone in (httpx.Response(404), httpx.Response(200), httpx.Response(200, json={})):
+        route.mock(return_value=gone)
+        assert tt.get_task("p", "t") is None
+    odd_answers: list[object] = [[], {"errorCode": "x"}, {"id": "another"}]
+    for odd in odd_answers:
+        route.mock(return_value=httpx.Response(200, json=odd))
+        with pytest.raises(TypeError, match="task t"):
+            tt.get_task("p", "t")
+
+
+@respx.mock
 def test_habit_checkins_range_includes_the_last_day() -> None:
     """TickTick's ``to`` is exclusive (seen 2026-11-25: today's check-ins were missing)."""
     route = respx.get(f"{TT}/open/v1/habit/checkins").mock(

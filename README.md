@@ -306,7 +306,8 @@ API details and the field-mapping table are in [docs/api-notes.md](docs/api-note
 The sync handles these defensively, but TickTick's docs don't confirm them. They're marked **UNVERIFIED** in [docs/api-notes.md](docs/api-notes.md); reports either way are welcome.
 
 1. Updating a TickTick task with `dueDate: null` clears its due date.
-2. A deleted TickTick task answers 404 (or carries a `deleted` flag).
+2. A deleted TickTick task answers 404 (or an empty answer, or carries a `deleted` flag).
+3. A TickTick list with no open tasks may come back without its `tasks` field.
 
 ## Contributing
 

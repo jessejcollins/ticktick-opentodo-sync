@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, cast
 
 from .e2ee import is_ciphertext
@@ -94,10 +94,18 @@ class TickTick:
         return _list(self.http.request("GET", "/open/v1/habit/sections"))
 
     def habit_checkins(self, habit_ids: list[str], from_stamp: int, to_stamp: int) -> list[JSON]:
-        """Check-in documents (``{habitId, checkins: [{stamp, status, ...}]}``)."""
+        """Check-in documents (``{habitId, checkins: [{stamp, status, ...}]}``).
+
+        Both stamps (``YYYYMMDD``) are inclusive here; TickTick's ``to`` is exclusive.
+        """
         if not habit_ids:
             return []
-        params = {"habitIds": ",".join(habit_ids), "from": str(from_stamp), "to": str(to_stamp)}
+        end = datetime.strptime(str(to_stamp), "%Y%m%d").date() + timedelta(days=1)
+        params = {
+            "habitIds": ",".join(habit_ids),
+            "from": str(from_stamp),
+            "to": end.strftime("%Y%m%d"),
+        }
         return _list(self.http.request("GET", "/open/v1/habit/checkins", params=params))
 
     def create_habit(self, body: JSON) -> JSON:
@@ -119,7 +127,10 @@ class TickTick:
 
 
 def _list(data: Any) -> list[JSON]:
-    return [x for x in data if isinstance(x, dict)] if isinstance(data, list) else []
+    """A list response; anything else raises (never read as "none")."""
+    if not isinstance(data, list):
+        raise TypeError(f"unexpected TickTick response: {type(data).__name__}, not a list")
+    return [x for x in data if isinstance(x, dict)]
 
 
 def _obj(data: Any) -> JSON:

@@ -172,3 +172,44 @@ def test_opentodo_reminders_refuse_an_odd_listing() -> None:
     respx.get(f"{OT}/api/v1/reminders").mock(return_value=httpx.Response(200, json=[]))
     with pytest.raises(TypeError):
         ot.tasks()
+
+
+@respx.mock
+def test_redirect_is_an_error_not_an_empty_answer() -> None:
+    """2026-11-25: OpenTodo's host answered every call with an empty 308 to itself."""
+    respx.get(f"{OT}/api/v1/projects").mock(
+        return_value=httpx.Response(308, headers={"Location": f"{OT}/api/v1/projects"})
+    )
+    with pytest.raises(ApiError, match="308"):
+        OpenTodo(http(OT)).projects()
+
+
+@respx.mock
+@pytest.mark.parametrize("body", [None, [], {"other": []}])
+def test_odd_responses_never_read_as_nothing(body: object) -> None:
+    content = b"" if body is None else json.dumps(body).encode()
+    for path in ("/api/v1/me", "/api/v1/projects", "/api/v1/labels"):
+        respx.get(f"{OT}{path}").mock(return_value=httpx.Response(200, content=content))
+    respx.get(f"{TT}/open/v1/project").mock(return_value=httpx.Response(200, content=content))
+    ot = OpenTodo(http(OT))
+    if not isinstance(body, dict):  # a dict without "encryption" is a server without E2EE
+        with pytest.raises(TypeError):
+            ot.begin_pass()
+    with pytest.raises(TypeError):
+        ot.projects()
+    with pytest.raises(TypeError):
+        ot.labels()
+    if not isinstance(body, list):  # a list is TickTick's normal shape
+        with pytest.raises(TypeError):
+            TickTick(http(TT)).projects()
+
+
+@respx.mock
+def test_habit_checkins_range_includes_the_last_day() -> None:
+    """TickTick's ``to`` is exclusive (seen 2026-11-25: today's check-ins were missing)."""
+    route = respx.get(f"{TT}/open/v1/habit/checkins").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    TickTick(http(TT)).habit_checkins(["h1", "h2"], 20261126, 20261231)
+    params = route.calls[0].request.url.params
+    assert (params["habitIds"], params["from"], params["to"]) == ("h1,h2", "20261126", "20270101")

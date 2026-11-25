@@ -70,7 +70,7 @@ Fill in:
 | Variable | Where to get it |
 |---|---|
 | `TICKTICK_TOKEN` | TickTick web → avatar → **Settings → Account → API Token** |
-| `OPENTODO_URL` | Your OpenTodo server, e.g. `https://todo.example.com` (without `/api/v1`) |
+| `OPENTODO_URL` | Your OpenTodo server, e.g. `https://todo.example.com` (without `/api/v1`). Plain `http://` is refused except to `localhost`, because the token would travel unencrypted. For a server on a network you trust, see `TICKTICK_OPENTODO_SYNC_ALLOW_HTTP` in [.env.example](.env.example) |
 | `OPENTODO_TOKEN` | OpenTodo → **Settings → Integrations → API tokens**, scope **full** (`agent` tokens are limited to 30 writes a minute) |
 | `OPENTODO_ENCRYPTION_RECOVERY_KEY` *or* `OPENTODO_ENCRYPTION_PASSPHRASE` | Only if OpenTodo end-to-end encryption is on. See [below](#opentodo-end-to-end-encryption) |
 

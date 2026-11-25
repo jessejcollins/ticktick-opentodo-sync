@@ -30,12 +30,45 @@ def test_missing_required() -> None:
         ("TICKTICK_OPENTODO_SYNC_TIMEZONE", "Mars/Base"),
         ("TICKTICK_OPENTODO_SYNC_INTERVAL", "10"),
         ("TICKTICK_OPENTODO_SYNC_MAX_DESTRUCTIVE", "x"),
+        ("TICKTICK_OPENTODO_SYNC_ALLOW_HTTP", "maybe"),
         ("OPENTODO_URL", "ot.example"),
+        ("OPENTODO_URL", "ftp://ot.example"),
+        ("OPENTODO_URL", "https://"),
     ],
 )
 def test_invalid_values(key: str, value: str) -> None:
     with pytest.raises(ConfigError):
         load(REQUIRED | {key: value})
+
+
+@pytest.mark.parametrize(
+    "url", ["http://todo.lan", "http://192.168.1.10:8080", "http://user:s3cret@todo.lan"]
+)
+def test_http_is_refused(url: str) -> None:
+    """The full-scope token, and OpenTodo's encryption key record, would travel unencrypted."""
+    with pytest.raises(ConfigError, match="ALLOW_HTTP=true") as err:
+        load(REQUIRED | {"OPENTODO_URL": url})
+    assert "todo.lan" not in str(err.value) and "s3cret" not in str(err.value)  # never echoed
+
+
+@pytest.mark.parametrize("url", ["http://localhost:8080", "http://127.0.0.1", "http://[::1]:3000"])
+def test_http_to_this_machine_is_fine(url: str) -> None:
+    cfg = load(REQUIRED | {"OPENTODO_URL": url})
+    assert cfg.opentodo_url == url and cfg.warnings == ()
+
+
+def test_http_elsewhere_with_the_opt_in() -> None:
+    cfg = load(
+        REQUIRED
+        | {"OPENTODO_URL": "http://opentodo:8080/", "TICKTICK_OPENTODO_SYNC_ALLOW_HTTP": "true"}
+    )
+    assert cfg.opentodo_url == "http://opentodo:8080"
+    assert cfg.warnings == ("OPENTODO_URL uses http://: the token travels unencrypted",)
+
+
+def test_ticktick_base_url_is_checked_too() -> None:
+    with pytest.raises(ConfigError, match="TICKTICK_BASE_URL"):
+        load(REQUIRED | {"TICKTICK_BASE_URL": "http://api.ticktick.com"})
 
 
 def test_env_file_parsing_and_precedence(tmp_path: Path) -> None:

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import difflib
+import ipaddress
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .ticktick import BASE_URL as TICKTICK_BASE_URL
@@ -30,6 +32,7 @@ KNOWN_SETTINGS = frozenset(
         "HTTP_TIMEOUT",
         "STATE_DIR",
         "RUN_DIR",
+        "ALLOW_HTTP",
     )
 )
 
@@ -158,16 +161,19 @@ def load(env: Mapping[str, str] | None = None, env_file: Path | None = None) -> 
                 f"TICKTICK_OPENTODO_SYNC_TIMEZONE: unknown time zone {tz!r}"
             ) from None
 
-    url = str(get("OPENTODO_URL"))
-    if not url.startswith(("https://", "http://")):
-        raise ConfigError("OPENTODO_URL must start with https://")
+    warnings = unknown_settings(merged)
+    allow_http = _bool(PREFIX + "ALLOW_HTTP", get(PREFIX + "ALLOW_HTTP", "false") or "false")
+    opentodo_url = _base_url("OPENTODO_URL", str(get("OPENTODO_URL")), allow_http, warnings)
+    ticktick_url = _base_url(
+        "TICKTICK_BASE_URL", str(get("TICKTICK_BASE_URL", TICKTICK_BASE_URL)), allow_http, warnings
+    )
 
     run_dir = get("TICKTICK_OPENTODO_SYNC_RUN_DIR")
     return Config(
         ticktick_token=str(get("TICKTICK_TOKEN")),
-        opentodo_url=url.rstrip("/"),
+        opentodo_url=opentodo_url,
         opentodo_token=str(get("OPENTODO_TOKEN")),
-        ticktick_base_url=str(get("TICKTICK_BASE_URL", TICKTICK_BASE_URL)),
+        ticktick_base_url=ticktick_url,
         state_dir=Path(
             str(get("TICKTICK_OPENTODO_SYNC_STATE_DIR", get("STATE_DIRECTORY", "state")))
         ),
@@ -201,5 +207,35 @@ def load(env: Mapping[str, str] | None = None, env_file: Path | None = None) -> 
         # Not stripped: whitespace may be part of a passphrase.
         opentodo_passphrase=merged.get("OPENTODO_ENCRYPTION_PASSPHRASE") or None,
         opentodo_recovery_key=get("OPENTODO_ENCRYPTION_RECOVERY_KEY"),
-        warnings=tuple(unknown_settings(merged)),
+        warnings=tuple(warnings),
     )
+
+
+def _base_url(name: str, url: str, allow_http: bool, warnings: list[str]) -> str:
+    """A service's base URL: https://, or http:// to this machine or when explicitly allowed.
+
+    Over plain http the bearer token travels unencrypted, and for OpenTodo so does the
+    encryption key record (salt, iterations, wrapped key: enough to guess the passphrase
+    offline). The URL is never echoed: it could carry credentials.
+    """
+    parts = urlsplit(url)
+    if parts.scheme not in ("https", "http") or not parts.hostname:
+        raise ConfigError(f"{name} must be a URL like https://todo.example.com")
+    if parts.scheme == "http" and not _loopback(parts.hostname):
+        if not allow_http:
+            raise ConfigError(
+                f"{name} uses http://, which sends the token (and OpenTodo's encryption key "
+                f"record) unencrypted. Use https://, or set {PREFIX}ALLOW_HTTP=true for a "
+                "server on a network you trust"
+            )
+        warnings.append(f"{name} uses http://: the token travels unencrypted")
+    return url.rstrip("/")
+
+
+def _loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False

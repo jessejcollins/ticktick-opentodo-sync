@@ -28,7 +28,7 @@ from ticktick_opentodo_sync.habits import (
     window,
 )
 from ticktick_opentodo_sync.opentodo import PLACEHOLDER
-from ticktick_opentodo_sync.state import State
+from ticktick_opentodo_sync.state import State, habit_refused
 from ticktick_opentodo_sync.sync import PassResult, Syncer
 
 DAILY = "RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=SU,MO,TU,WE,TH,FR,SA"
@@ -170,6 +170,10 @@ def test_plan_days() -> None:
         "d4": DKind.CLEAR_TT,  # OpenTodo un-checked it
         "d5": DKind.CHECK_TT,  # OpenTodo checked it
     }
+    # A check-in OpenTodo refused isn't offered again; nothing else changes.
+    refused = {("t", "d2"), ("t", "d3")}
+    rows = {a.day: a.kind for a in plan_days([("t", "o")], days, tt, ot, base, refused=refused)}
+    assert rows == {"d3": DKind.CLEAR_OT, "d4": DKind.CLEAR_TT, "d5": DKind.CHECK_TT}
 
 
 def test_window() -> None:
@@ -279,6 +283,29 @@ def test_missed_days_then_a_check_in_moves_the_opentodo_habit(env: Env) -> None:
     assert env.ot_days(habit) == ["2026-11-10", "2026-11-23"]
     assert habit["due"] == {"date": "2026-11-24"}
     env.quiet()
+
+
+def test_day_opentodo_refuses_stays_in_ticktick(env: Env) -> None:
+    """OpenTodo takes no day before a habit's first one: a TickTick back-fill stays there.
+
+    It used to be recorded as synced anyway, so the next pass read OpenTodo's gap as an
+    un-check and cleared the day in TickTick.
+    """
+    hid = env.tt.add_habit("Read")
+    env.tt.checkins[(hid, 20261120)] = 2
+    env.run()  # the OpenTodo habit starts on 11-20
+    habit = env.ot_habit("Read")
+    env.tt.checkins[(hid, 20261115)] = 2  # back-filled in TickTick
+    res = env.run()  # OpenTodo refuses 11-15
+    assert not res.habits_ot.completed and not res.habits_tt.deleted, res.summary()
+    assert habit_refused(env.state) == {(hid, "2026-11-15")}
+    env.quiet()  # not offered again, and not cleared in TickTick
+    assert env.tt_days(hid) == [20261115, 20261120]
+    assert env.ot_days(habit) == ["2026-11-20"]
+
+    env.tt.checkins[(hid, 20261115)] = 0  # un-checked in TickTick: nothing left to remember
+    env.quiet()
+    assert habit_refused(env.state) == set()
 
 
 def test_opentodo_habit_is_created_in_ticktick(env: Env) -> None:

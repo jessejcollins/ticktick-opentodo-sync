@@ -211,7 +211,7 @@ The same limit applies to habit check-ins being cleared in TickTick.
   - **"After completion" rules** always just move the date.
 - **Subtasks:** TickTick checklist items appear in OpenTodo as subtasks, ticked items as completed ones, and TickTick child tasks as OpenTodo subtasks. Titles and ticks sync both ways, as do adding and deleting. A subtask added in OpenTodo becomes a checklist item if the TickTick task is a checklist, otherwise a TickTick child task. Order is copied when an item is created, not afterwards. On a conflict TickTick wins, including whether an item is ticked.
 - **Reminders:** TickTick reminders ↔ OpenTodo relative reminders. For all-day tasks, TickTick counts from midnight and OpenTodo from 09:00, and the sync converts between the two.
-- **Habits:** name, repeat, part of the day (morning/afternoon/evening ↔ TickTick's sections) and reminder times are kept in step. Ticking or un-ticking a day in either app is copied to the other, for the last 30 days. New TickTick habits appear in an OpenTodo project called **Habits**; new OpenTodo habits are created in TickTick as yes/no habits.
+- **Habits:** name, repeat, part of the day (morning/afternoon/evening ↔ TickTick's sections) and reminder times are kept in step. Ticking or un-ticking a day in either app is copied to the other, for the last 30 days. OpenTodo can't record a day before a habit's first day there, so ticking such a day in TickTick stays in TickTick only. New TickTick habits appear in an OpenTodo project called **Habits**; new OpenTodo habits are created in TickTick as yes/no habits.
 
 ## OpenTodo end-to-end encryption
 

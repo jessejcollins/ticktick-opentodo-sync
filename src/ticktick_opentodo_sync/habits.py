@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
@@ -289,12 +290,18 @@ def plan_days(
     tt_done: set[tuple[str, str]],
     ot_done: set[tuple[str, str]],
     base: set[tuple[str, str]],
+    *,
+    refused: AbstractSet[tuple[str, str]] = frozenset(),
 ) -> list[DayAction]:
     """Check-ins of (TickTick id, OpenTodo id) pairs on ``days`` (oldest first).
 
     With one boolean per side, the sides can only disagree when exactly one of them moved
     away from ``base``, so there is no conflict to resolve. A new pair has an empty base:
     the side that has check-ins copies them over (the first-run backfill).
+
+    ``refused``: (TickTick id, day) check-ins OpenTodo would not record (a day before the
+    habit's first one there). They stay in TickTick only and aren't offered again; they
+    never enter ``base``, so the gap in OpenTodo doesn't read as an un-check there.
     """
     out: list[DayAction] = []
     for tt_id, ot_id in pairs:
@@ -304,6 +311,8 @@ def plan_days(
                 if t != b:
                     out.append(DayAction(DKind.RECORD, tt_id, ot_id, day, t))
             elif t != b:
+                if t and (tt_id, day) in refused:
+                    continue
                 out.append(DayAction(DKind.CHECK_OT if t else DKind.CLEAR_OT, tt_id, ot_id, day, t))
             else:
                 out.append(DayAction(DKind.CHECK_TT if o else DKind.CLEAR_TT, tt_id, ot_id, day, o))

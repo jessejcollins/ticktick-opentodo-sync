@@ -18,7 +18,7 @@ from .engine import Pair
 from .habits import HabitDef, HabitPair
 from .models import Task
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 TASKS = "pairs"
 ITEMS = "item_pairs"
@@ -52,6 +52,11 @@ CREATE TABLE IF NOT EXISTS habit_pairs (
     updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS habit_days (
+    tt_id TEXT NOT NULL,
+    day   TEXT NOT NULL,
+    PRIMARY KEY (tt_id, day)
+);
+CREATE TABLE IF NOT EXISTS habit_refused (
     tt_id TEXT NOT NULL,
     day   TEXT NOT NULL,
     PRIMARY KEY (tt_id, day)
@@ -269,6 +274,22 @@ def set_habit_day(state: State, tt_id: str, day: str, done: bool) -> None:
         )
     else:
         state.db.execute("DELETE FROM habit_days WHERE tt_id = ? AND day = ?", (tt_id, day))
+
+
+def habit_refused(state: State) -> set[tuple[str, str]]:
+    """(TickTick habit id, day) check-ins OpenTodo refused to record; kept in TickTick only."""
+    return {
+        (r["tt_id"], r["day"]) for r in state.db.execute("SELECT tt_id, day FROM habit_refused")
+    }
+
+
+def set_habit_refused(state: State, tt_id: str, day: str, refused: bool) -> None:
+    if refused:
+        state.db.execute(
+            "INSERT OR IGNORE INTO habit_refused (tt_id, day) VALUES (?, ?)", (tt_id, day)
+        )
+    else:
+        state.db.execute("DELETE FROM habit_refused WHERE tt_id = ? AND day = ?", (tt_id, day))
 
 
 def prune_habit_days(state: State, before: str) -> None:

@@ -55,6 +55,10 @@ META_PROJECT = "ot_habits_project"
 """Meta key: id of the OpenTodo project new habits go to (kept out of the task sync)."""
 
 
+class CheckInRefusedError(Exception):
+    """OpenTodo won't record this habit day (before the habit's first day, or in the future)."""
+
+
 class HabitTickTick(Protocol):
     def habits(self) -> list[JSON]: ...
     def habit_sections(self) -> list[JSON]: ...
@@ -181,7 +185,8 @@ class HabitSync:
                 ot_defs.setdefault(pair[1], a.habit)
 
         base = st.habit_days(self.state)
-        actions = plan_days(day_pairs, days, tt_done, ot_done, base)
+        refused = self._refused(day_pairs, tt_done, ot_done, dry_run=dry_run)
+        actions = plan_days(day_pairs, days, tt_done, ot_done, base, refused=refused)
         clears = sum(a.kind is DKind.CLEAR_TT for a in actions)
         if clears > self.max_destructive and not allow_bulk:
             res.errors += 1
@@ -347,6 +352,31 @@ class HabitSync:
 
     # --- days -------------------------------------------------------------------------
 
+    def _refused(
+        self,
+        day_pairs: list[tuple[str, str]],
+        tt_done: set[tuple[str, str]],
+        ot_done: set[tuple[str, str]],
+        *,
+        dry_run: bool,
+    ) -> set[tuple[str, str]]:
+        """Refused check-ins that still stand: checked in TickTick, still not in OpenTodo.
+
+        The others (un-checked in TickTick, recorded in OpenTodo after all, or out of the
+        window) are forgotten.
+        """
+        ot_ids = dict(day_pairs)
+        refused = st.habit_refused(self.state)
+        standing = {
+            (tt_id, day)
+            for tt_id, day in refused
+            if (tt_id, day) in tt_done and (ot_ids.get(tt_id, ""), day) not in ot_done
+        }
+        if not dry_run:
+            for tt_id, day in refused - standing:
+                st.set_habit_refused(self.state, tt_id, day, False)
+        return standing
+
     def _apply_days(
         self,
         actions: list[DayAction],
@@ -365,6 +395,18 @@ class HabitSync:
             if not dry_run:
                 try:
                     self._apply_day(a, ot_due)
+                except CheckInRefusedError as exc:
+                    # Not recorded as synced: the gap in OpenTodo would then read as an
+                    # un-check there, and the next pass would clear the day in TickTick.
+                    st.set_habit_refused(self.state, a.tt_id, a.day, True)
+                    log.warning(
+                        "OpenTodo won't take habit %r on %s (%s); it stays checked in TickTick "
+                        "only",
+                        names.get(a.tt_id, a.tt_id),
+                        a.day,
+                        exc,
+                    )
+                    continue
                 except Exception as exc:
                     res.errors += 1
                     log.error(  # noqa: TRY400
@@ -402,8 +444,7 @@ class HabitSync:
             except ApiError as exc:
                 if exc.status != 400:
                     raise
-                log.warning("OpenTodo won't take habit day %s (%s); left as is", a.day, exc)
-                return
+                raise CheckInRefusedError(str(exc)) from exc
             current = (resp.get("habit") or {}).get("current_date")
             if a.day >= due or not due:
                 ot_due[a.ot_id] = str(current or _next_day(a.day))

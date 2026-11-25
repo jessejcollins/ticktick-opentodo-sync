@@ -303,7 +303,7 @@ API details and the field-mapping table are in [docs/api-notes.md](docs/api-note
 
 ### Unconfirmed API behaviour
 
-The sync handles these defensively, but TickTick's docs don't confirm them. They're marked **UNVERIFIED** in [docs/api-notes.md](docs/api-notes.md); reports either way are welcome.
+The sync handles these defensively, but TickTick's docs don't confirm them. They're marked **UNVERIFIED** in [docs/api-notes.md](docs/api-notes.md); reports either way are welcome. When either app ignores part of a write, the log says so, for example `WARNING TickTick didn't take the due of 'Report'`. Such a line is exactly the kind of report that helps.
 
 1. Updating a TickTick task with `dueDate: null` clears its due date.
 2. A deleted TickTick task answers 404 (or an empty answer, or carries a `deleted` flag).

@@ -320,6 +320,46 @@ def test_delete_in_opentodo_but_changed_in_ticktick_recreates(env: Env) -> None:
     env.assert_quiet()
 
 
+def test_a_field_ticktick_ignores_is_reported(
+    env: Env, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The readback's hash is recorded, so an ignored field left the apps different without a
+    word. Whether TickTick clears a due date on ``dueDate: null`` is unverified."""
+    seed(env)
+    update = env.tt.update_task
+
+    def keeps_its_due(task_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        if body.get("dueDate") is None:
+            body = {k: v for k, v in body.items() if k not in ("dueDate", "startDate")}
+        return update(task_id, body)
+
+    monkeypatch.setattr(env.tt, "update_task", keeps_its_due)
+    env.ot_by_title("Report")["priority"] = 2  # an ordinary edit: nothing to report
+    env.run()
+    assert "didn't take" not in caplog.text
+    env.ot_by_title("Report")["due"] = None  # cleared in OpenTodo
+    env.run()
+    assert "TickTick didn't take the due of 'Report'" in caplog.text
+
+
+def test_a_field_opentodo_ignores_is_reported(
+    env: Env, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _, b = seed(env)
+    update = env.ot.update_task
+
+    def ignores_priority(task_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return update(task_id, {k: v for k, v in body.items() if k != "priority"})
+
+    monkeypatch.setattr(env.ot, "update_task", ignores_priority)
+    env.tt.tasks[b]["content"] = "Q4 numbers"  # an ordinary edit: nothing to report
+    env.run()
+    assert "didn't take" not in caplog.text
+    env.tt.tasks[b]["priority"] = 1
+    env.run()
+    assert "OpenTodo didn't take the priority of 'Report'" in caplog.text
+
+
 def test_move_between_projects_in_opentodo(env: Env) -> None:
     a, _ = seed(env)
     otp = next(iter(env.ot.projects_))

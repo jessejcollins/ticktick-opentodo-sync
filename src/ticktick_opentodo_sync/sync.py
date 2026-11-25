@@ -938,6 +938,11 @@ class Syncer:
         )
         resp = self.ot.update_task(a.ot_id, body)
         readback = w.mapper.from_ot(resp) if resp.get("id") else a.task
+        # A rule TickTick only knows isn't sent; completing a repeating task clears it.
+        rule = readback.recurrence if a.task.ticktick_only_rule else a.task.recurrence
+        if a.task.completed and not current.completed:
+            rule = None
+        _check_taken("OpenTodo", replace(a.task, recurrence=rule), readback)
         self.state.update_pair(
             a.tt_id, ot_hash=readback.content_hash(), tt_hash=a.tt_hash, base=a.task
         )
@@ -968,8 +973,18 @@ class Syncer:
             if reopen:
                 body |= {"status": 0, "completedTime": None}
             resp = self.tt.update_task(a.tt_id, body)
-            if resp.get("id") and not complete:
-                tt_hash = w.mapper.from_tt(resp).content_hash()
+            if resp.get("id"):
+                readback = w.mapper.from_tt(resp)
+                if not complete:
+                    tt_hash = readback.content_hash()
+                # The update only reopens (a completion follows below), and the rule is left
+                # alone when OpenTodo's can't be written to TickTick (warned in mapping).
+                expected = replace(
+                    a.task,
+                    completed=current.completed and not reopen,
+                    recurrence=readback.recurrence,
+                )
+                _check_taken("TickTick", expected, readback)
         if complete:
             # Record the *completed* content: a recurring task comes back open with the next
             # due date, and that must then read as a TickTick change to push to OpenTodo.
@@ -1340,6 +1355,19 @@ def _count(a: Action, res: PassResult) -> None:
         side.completed += a.completes
     elif a.kind in (Kind.DELETE_OT, Kind.DELETE_TT):
         side.deleted += 1
+
+
+def _check_taken(side: str, sent: Task, got: Task) -> None:
+    """Warn about fields a write didn't change. The readback's hash is what gets recorded (so
+    the sync never mistakes its own write for an edit), so an ignored field left the two
+    apps different without a word."""
+    if fields := changed_fields(sent, got):
+        log.warning(
+            "%s didn't take the %s of %r: the apps differ there until either side changes it",
+            side,
+            ", ".join(fields),
+            sent.title,
+        )
 
 
 def _tt_view(w: World, raw: JSON) -> tuple[Task, list[tuple[str, str, object]]]:

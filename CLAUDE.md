@@ -185,6 +185,7 @@ Every change goes through a pull request.
 ## Logging and ops
 
 - Log to stdout (`docker compose logs ticktick-opentodo-sync`). One summary line per pass: created / updated / completed / deleted per side, for tasks, checklist items and habits, plus conflicts and errors.
+- After a task update, what the API sent back is compared with what was sent. A field that didn't take is logged as a warning (`… didn't take the due of …`), because the readback's hash is what's recorded and the difference would otherwise go unnoticed. Intended differences are excluded: a repeating task's rule cleared on completion, TickTick-only rules, a completion that follows the update.
 - One-shot runs exit non-zero on errors. In loop mode, the Docker `HEALTHCHECK` (`ticktick-opentodo-sync --health`) reports failures, so `docker ps` shows `unhealthy`.
 - `--status` prints the last run time, counts and any blocked bulk-delete (`docker compose exec ticktick-opentodo-sync ticktick-opentodo-sync --status`).
 - One-off runs and the loop container share the SQLite file. A file lock in `/data` serializes them.

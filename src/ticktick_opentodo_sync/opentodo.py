@@ -67,7 +67,10 @@ class OpenTodo:
     def begin_pass(self) -> None:
         """Check the account's encryption and unlock (or re-unlock) the key if needed."""
         me = self.http.request("GET", "/api/v1/me")
-        enc = me.get("encryption") if isinstance(me, dict) else None
+        if not isinstance(me, dict):
+            # Never read "encryption off" from a response we don't understand.
+            raise TypeError(f"unexpected GET /api/v1/me response: {type(me).__name__}")
+        enc = me.get("encryption")
         enc = enc if isinstance(enc, dict) else {}
         self.encrypted = bool(enc.get("enabled"))
         if not self.encrypted:
@@ -214,9 +217,6 @@ class OpenTodo:
 
     def _load_reminders(self) -> None:
         data = self.http.request("GET", "/api/v1/reminders")
-        if not isinstance(data, dict) or not isinstance(data.get("reminders"), list):
-            # Never read "no reminders" from a response we don't understand.
-            raise TypeError(f"unexpected GET /api/v1/reminders response: {type(data).__name__}")
         self._reminders = {}
         for r in _items(data, "reminders"):
             if (
@@ -284,8 +284,11 @@ def _split_reminders(body: JSON) -> tuple[JSON, list[int] | None]:
 
 
 def _items(data: Any, key: str) -> list[JSON]:
+    """The ``key`` list of a response; anything else raises (never read as "none")."""
     items = data.get(key) if isinstance(data, dict) else None
-    return [x for x in items if isinstance(x, dict)] if isinstance(items, list) else []
+    if not isinstance(items, list):
+        raise TypeError(f"unexpected OpenTodo response: no {key!r} list")
+    return [x for x in items if isinstance(x, dict)]
 
 
 def _obj(data: Any) -> JSON:

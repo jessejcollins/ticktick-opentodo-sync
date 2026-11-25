@@ -86,8 +86,14 @@ class Http:
             else:
                 if resp.status_code == 404 and not_found_ok:
                     return None
-                if resp.status_code < 400:
+                if resp.status_code < 300:
                     return resp.json() if resp.content.strip() else None
+                if resp.status_code < 400:
+                    # Redirects aren't followed: an empty 3xx body must never read as "no data".
+                    where = resp.headers.get("Location", "")
+                    raise ApiError(
+                        self.service, method, path, resp.status_code, f"redirect to {where!r}"
+                    )
                 if resp.status_code not in RETRY_STATUSES or attempt >= self.retries:
                     raise ApiError(self.service, method, path, resp.status_code, resp.text)
                 delay = _retry_after(resp) or 2.0**attempt

@@ -119,7 +119,10 @@ class TickTick:
 
 
 def _list(data: Any) -> list[JSON]:
-    return [x for x in data if isinstance(x, dict)] if isinstance(data, list) else []
+    """A list response; anything else raises (never read as "none")."""
+    if not isinstance(data, list):
+        raise TypeError(f"unexpected TickTick response: {type(data).__name__}, not a list")
+    return [x for x in data if isinstance(x, dict)]
 
 
 def _obj(data: Any) -> JSON:

@@ -208,7 +208,11 @@ class Syncer:
         ot_project_ids: set[str] = set()
         trashed: set[str] = set()
         renames: list[tuple[str, str]] = []
-        habits_project = self.state.get_meta(META_PROJECT)
+        ot_project_list = self.ot.projects()
+        ot_task_list = self.ot.tasks()  # before reconciling projects: see _find_habits_project
+        habits_project = self.state.get_meta(META_PROJECT) or self._find_habits_project(
+            ot_project_list, ot_task_list, dry_run=dry_run
+        )
         names = {
             ot: tt_projects[tt].name
             for tt, ot in self.state.project_pairs().items()
@@ -216,7 +220,7 @@ class Syncer:
         }
         if habits_project:
             names[habits_project] = HABITS_PROJECT
-        for p in self.ot.projects():
+        for p in ot_project_list:
             if not p.get("id"):
                 continue
             pid = str(p["id"])
@@ -273,7 +277,7 @@ class Syncer:
         for pair in world.pairs.values():
             mapper.link_task(pair.tt_id, pair.ot_id)
         self._collect_tt(world, [pid for pid in tt_projects if pid in in_scope], in_scope, dry_run)
-        children = self._collect_ot(world, in_scope)
+        children = self._collect_ot(world, in_scope, ot_task_list)
         self._resolve_missing_tt(world, in_scope)
         self._refresh_tt_projects(world, dry_run=dry_run)
         self._collect_subtasks(world, children, in_scope)
@@ -296,6 +300,40 @@ class Syncer:
                 self.state.update_pair(tt_id, tt_project=str(seen))
 
     # --- lists and projects -------------------------------------------------------------
+
+    def _find_habits_project(
+        self, projects: list[JSON], tasks: list[JSON], *, dry_run: bool
+    ) -> str | None:
+        """The habit sync's OpenTodo project when its id isn't in the state (after a reset).
+
+        Without it, the old "Habits" project read as an ordinary project and was turned into
+        a TickTick list. Taken back: a live project named "Habits" that holds open habits.
+        """
+        holding = {
+            str(t["project_id"])
+            for t in tasks
+            if t.get("habit")
+            and t.get("project_id")
+            and not t.get("series_id")
+            and t.get("deleted_at") is None
+        }
+        for p in projects:
+            pid = str(p.get("id") or "")
+            if (
+                pid in holding
+                and p.get("deleted_at") is None
+                and str(p.get("name") or "").strip().casefold() == HABITS_PROJECT.casefold()
+            ):
+                log.info(
+                    "%suse OpenTodo project %r (%s) for habits again",
+                    "would " if dry_run else "",
+                    HABITS_PROJECT,
+                    pid,
+                )
+                if not dry_run:
+                    self.state.set_meta(META_PROJECT, pid)
+                return pid
+        return None
 
     def _apply_projects(self, w: World, *, dry_run: bool) -> bool:
         """Apply the list/project changes :meth:`collect` planned (the guards have passed).
@@ -411,7 +449,7 @@ class Syncer:
     def _top_level_tt(w: World, tt_id: str) -> bool:
         return tt_id in w.tt.tasks and not w.tt_raw.get(tt_id, {}).get("parentId")
 
-    def _collect_ot(self, w: World, in_scope: set[str]) -> list[JSON]:
+    def _collect_ot(self, w: World, in_scope: set[str], ot_tasks: list[JSON]) -> list[JSON]:
         """Top-level OpenTodo tasks; returns the open subtasks for :meth:`_collect_subtasks`."""
         unreadable_labels: set[str] = set()
         for label in self.ot.labels():
@@ -429,7 +467,7 @@ class Syncer:
 
         children: list[JSON] = []
         paired = {p.ot_id for p in w.pairs.values()}
-        for raw in self.ot.tasks():
+        for raw in ot_tasks:
             oid = str(raw.get("id") or "")
             if not oid:
                 continue

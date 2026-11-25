@@ -22,6 +22,7 @@ from ticktick_opentodo_sync.habits import (
     habit_from_tt,
     habit_to_ot,
     habit_to_tt,
+    match_habits,
     ot_done_days,
     plan_days,
     plan_habits,
@@ -157,6 +158,16 @@ def test_plan_habits() -> None:
     assert plan_habits([hp()], {}, {"o": renamed}) == []  # deletions aren't synced
     kinds = [a.kind for a in plan_habits([], {"t": H}, {"o": H})]
     assert kinds == [HKind.CREATE_OT, HKind.CREATE_TT]
+
+
+def test_match_habits() -> None:
+    walk, run = HabitDef("Walk", EVERY_DAY), HabitDef("Run", EVERY_DAY)
+    tt = {"t1": H, "t2": walk, "t3": run, "t4": run, "t5": HabitDef("Only in TickTick")}
+    ot = {"o1": HabitDef(" read "), "o2": HabitDef("WALK"), "o3": run, "o4": HabitDef("Mine")}
+    pairs = [HabitPair("t1", "o9", "", "")]  # t1 is paired with another habit already
+    matches, ambiguous = match_habits(pairs, tt, ot)
+    assert matches == [("t2", "o2")]  # by name, ignoring case and spaces
+    assert ambiguous == {"run"}  # twice in TickTick: neither side's copy is made
 
 
 def test_plan_days() -> None:
@@ -349,6 +360,46 @@ def test_definition_changes(env: Env) -> None:
     res = env.run()
     assert res.habits_tt.updated == 1, res.summary()
     assert env.tt.habits_[hid]["sectionId"] == "s-a"
+    env.quiet()
+
+
+def test_state_reset_pairs_habits_and_the_habits_project_again(env: Env, tmp_path: Path) -> None:
+    """After a reset (README: then --match-existing), every habit was created again on both
+    sides, and TickTick habits can't be deleted through the API. The old "Habits" project
+    became a TickTick list."""
+    read = env.tt.add_habit("Read")
+    env.tt.add_habit("Walk")
+    env.tt.checkins[(read, 20261123)] = 2
+    env.run()
+    env.state.close()
+    env.state = State(tmp_path / "reset.db")
+    Syncer(env.tt, env.ot, env.state, now_ms=lambda: NOW).match_existing(dry_run=False)
+    res = env.run()
+    assert not res.habits_tt.created and not res.habits_ot.created, res.summary()
+    assert len(env.tt.habits_) == 2
+    assert sum(1 for t in env.ot.tasks_.values() if t.get("habit")) == 2
+    assert not env.tt.projects_
+    assert env.tt_days(read) == [20261123]
+    env.quiet()
+
+
+def test_same_habit_made_in_both_apps_is_paired(env: Env) -> None:
+    env.tt.add_habit("Stretch")
+    env.ot.add_task("stretch", None, habit=True, recurrence=EVERY_DAY, due={"date": "2026-11-24"})
+    res = env.run()
+    assert not res.habits_tt.created and not res.habits_ot.created, res.summary()
+    assert len(env.tt.habits_) == 1
+    assert env.ot_habit("Stretch")  # TickTick's definition won, name included
+    env.quiet()
+
+
+def test_ambiguous_habit_names_are_left_alone(env: Env) -> None:
+    env.tt.add_habit("Read")
+    env.tt.add_habit("Read")
+    env.ot.add_task("Read", None, habit=True, recurrence=EVERY_DAY, due={"date": "2026-11-24"})
+    res = env.run()
+    assert not res.habits_tt.created and not res.habits_ot.created, res.summary()
+    assert len(env.tt.habits_) == 2
     env.quiet()
 
 

@@ -30,6 +30,8 @@ from .habits import (
     habit_from_tt,
     habit_to_ot,
     habit_to_tt,
+    match_habits,
+    name_key,
     ot_done_days,
     plan_days,
     plan_habits,
@@ -147,6 +149,7 @@ class HabitSync:
         ot_due = {
             oid: str((raw.get("due") or {}).get("date") or "") for oid, raw in ot_habits.items()
         }
+        pairs += self._pair_by_name(pairs, tt_defs, ot_defs, dry_run=dry_run)
 
         tt_done = tt_done_days(
             self.tt.habit_checkins(sorted(tt_defs), day_to_stamp(days[0]), day_to_stamp(days[-1]))
@@ -282,6 +285,41 @@ class HabitSync:
             log.info("moved OpenTodo habit %r back to today", h.name)
 
     # --- definitions ------------------------------------------------------------------
+
+    def _pair_by_name(
+        self,
+        pairs: list[HabitPair],
+        tt_defs: dict[str, HabitDef],
+        ot_defs: dict[str, HabitDef],
+        *,
+        dry_run: bool,
+    ) -> list[HabitPair]:
+        """New pairs of same-named unpaired habits (see :func:`match_habits`).
+
+        TickTick wins: its side reads as changed, so the plan copies its definition over (or
+        just records it when both agree). Unpaired habits whose name is ambiguous are dropped
+        from ``tt_defs``/``ot_defs`` with a warning, so neither side's copy is made.
+        """
+        matches, ambiguous = match_habits(pairs, tt_defs, ot_defs)
+        new = [
+            HabitPair(tt_id, ot_id, "", ot_defs[ot_id].content_hash()) for tt_id, ot_id in matches
+        ]
+        for p in new:
+            log.info("%spair habit %r by name", "would " if dry_run else "", tt_defs[p.tt_id].name)
+            if not dry_run:
+                st.put_habit_pair(self.state, p)
+        paired = {p.tt_id for p in [*pairs, *new]} | {p.ot_id for p in [*pairs, *new]}
+        for side, defs in (("TickTick", tt_defs), ("OpenTodo", ot_defs)):
+            for hid in [
+                h for h, d in defs.items() if h not in paired and name_key(d.name) in ambiguous
+            ]:
+                self._note(
+                    f"ambiguous:{hid}",
+                    f"{side} habit {defs[hid].name!r} not synced: that name is on both sides "
+                    "but not unique on one; rename one of them",
+                )
+                del defs[hid]
+        return new
 
     def _pseudo_pair(self, a: HabitAction) -> tuple[str, str] | None:
         if a.kind is HKind.CREATE_OT and a.tt_id:

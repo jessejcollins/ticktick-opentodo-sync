@@ -266,6 +266,40 @@ def plan_habits(
     return out
 
 
+def match_habits(
+    pairs: Iterable[HabitPair], tt: Mapping[str, HabitDef], ot: Mapping[str, HabitDef]
+) -> tuple[list[tuple[str, str]], set[str]]:
+    """Unpaired habits with the same name on both sides: pair them, don't copy each over.
+
+    After a state reset every habit is unpaired, and copying them would duplicate each one
+    on both sides (TickTick habits can't be deleted through the API). Returns the
+    (TickTick id, OpenTodo id) matches, and the names (casefolded) on both sides that aren't
+    unique on one of them: ambiguous, so neither side's copies are made.
+    """
+    pairs = list(pairs)
+    paired_tt, paired_ot = {p.tt_id for p in pairs}, {p.ot_id for p in pairs}
+    tt_names: dict[str, list[str]] = {}
+    for tt_id, h in sorted(tt.items()):
+        if tt_id not in paired_tt:
+            tt_names.setdefault(name_key(h.name), []).append(tt_id)
+    ot_names: dict[str, list[str]] = {}
+    for ot_id, h in sorted(ot.items()):
+        if ot_id not in paired_ot:
+            ot_names.setdefault(name_key(h.name), []).append(ot_id)
+    matches: list[tuple[str, str]] = []
+    ambiguous: set[str] = set()
+    for key in sorted(tt_names.keys() & ot_names.keys()):
+        if len(tt_names[key]) == 1 and len(ot_names[key]) == 1:
+            matches.append((tt_names[key][0], ot_names[key][0]))
+        else:
+            ambiguous.add(key)
+    return matches, ambiguous
+
+
+def name_key(name: str) -> str:
+    return name.strip().casefold()
+
+
 class DKind(Enum):
     CHECK_OT = "check_ot"
     CLEAR_OT = "clear_ot"

@@ -252,8 +252,25 @@ class Syncer:
         self._collect_tt(world, [pid for pid in tt_projects if pid in in_scope], in_scope, dry_run)
         children = self._collect_ot(world, in_scope)
         self._resolve_missing_tt(world, in_scope)
+        self._refresh_tt_projects(world, dry_run=dry_run)
         self._collect_subtasks(world, children, in_scope)
         return world
+
+    def _refresh_tt_projects(self, w: World, *, dry_run: bool) -> None:
+        """Keep each pair's TickTick list id on the list the task was last seen in.
+
+        GETs and DELETEs of a TickTick task go to its list. A task moved between lists in
+        TickTick and later completed was looked up under its old list, which may 404 and
+        read as "deleted": its OpenTodo copy went to the Trash instead of being completed.
+        Written only when it changed.
+        """
+        for tt_id, p in list(w.pairs.items()):
+            seen = (w.tt_raw.get(tt_id) or {}).get("projectId")
+            if not seen or str(seen) == p.tt_project:
+                continue
+            w.pairs[tt_id] = replace(p, tt_project=str(seen))
+            if not dry_run:
+                self.state.update_pair(tt_id, tt_project=str(seen))
 
     def _repair_project_name(self, p: JSON, name: str | None, *, dry_run: bool) -> None:
         """Rewrite a paired project whose name an open browser overwrote with the placeholder.

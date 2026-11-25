@@ -92,8 +92,15 @@ class FakeTickTick:
         ]
         return {"project": {"id": pid}, "tasks": tasks, "columns": []}
 
-    def get_task(self, project_id: str, task_id: str) -> JSON | None:
+    def _in(self, project_id: str, task_id: str) -> JSON | None:
+        """The task, only when asked for under its own list: whether the real API answers a
+        lookup under another list is UNVERIFIED (docs/api-notes.md), so assume a 404."""
         t = self.tasks.get(task_id)
+        pid = self.inbox_id if project_id == "inbox" else project_id
+        return t if t is not None and t["projectId"] == pid else None
+
+    def get_task(self, project_id: str, task_id: str) -> JSON | None:
+        t = self._in(project_id, task_id)
         return copy.deepcopy(t) if t else None
 
     @staticmethod
@@ -181,7 +188,8 @@ class FakeTickTick:
 
     def delete_task(self, project_id: str, task_id: str) -> None:
         self.writes.append(("delete", task_id))
-        self.tasks.pop(task_id, None)
+        if self._in(project_id, task_id) is not None:  # else a 404, which the client ignores
+            del self.tasks[task_id]
 
     def move_task(self, task_id: str, from_project: str, to_project: str) -> None:
         self.writes.append(("move", task_id))

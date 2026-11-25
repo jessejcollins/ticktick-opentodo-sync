@@ -120,6 +120,7 @@ Settled answers from the build. Dates are when they were decided or learned.
   - Before a pass first writes to either app, it proves the state is writable (`State.check_writable`, one small meta write). Passes with nothing to write still write nothing.
   - Any `sqlite3.Error` ends the pass; the per-action handlers re-raise it.
   - Remaining risk: a crash between a remote create and recording its pair still leaves one duplicate on each side.
+- **A pair's TickTick list** (2026-11-25): `pairs.tt_project` is the list the task was last seen in, refreshed every pass (written only when it changed). TickTick's GET and DELETE take the list in the path. Whether they answer for a task under another list is unverified, so the fakes treat that as a 404 (see `docs/api-notes.md`).
 - **Tags ↔ labels:** OpenTodo has no tags. It has labels, referenced by ID. They are matched by lowercase name, and missing labels are created.
 - **Priority mapping:** TickTick `0/1/3/5` (none/low/medium/high) ↔ OpenTodo `4/3/2/1` (1 is highest, 4 is the default).
 - **Conflicts:** TickTick wins every field except completion. A completion made on either side is never undone by a conflict ("Completed in either app" takes priority).

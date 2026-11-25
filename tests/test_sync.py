@@ -242,6 +242,38 @@ def test_move_between_projects_in_opentodo(env: Env) -> None:
     env.assert_quiet()
 
 
+def _moved_in_ticktick(env: Env) -> str:
+    """'Report' moved from Work to a new list Home in the TickTick app, and synced."""
+    _, b = seed(env)
+    home = env.tt.add_project("Home")
+    env.tt.tasks[b]["projectId"] = home
+    env.run()
+    assert next(p for p in env.state.pairs() if p.tt_id == b).tt_project == home
+    return b
+
+
+def test_moved_in_ticktick_then_completed_completes_in_opentodo(env: Env) -> None:
+    """The completed task was looked up under its old list: a 404 read as "deleted"."""
+    b = _moved_in_ticktick(env)
+    env.tt.tasks[b]["status"] = 2
+    res = env.run()
+    assert res.ot.completed == 1 and not res.ot.deleted, res.summary()
+    report = env.ot_by_title("Report")
+    assert report["completed_at"] is not None and report["deleted_at"] is None
+    env.assert_quiet()
+
+
+def test_moved_in_ticktick_then_deleted_in_opentodo_stays_deleted(env: Env) -> None:
+    """The DELETE went to the old list: its 404 was ignored and the task came back."""
+    b = _moved_in_ticktick(env)
+    env.ot.delete_task(env.ot_by_title("Report")["id"])
+    res = env.run()
+    assert res.tt.deleted == 1, res.summary()
+    assert b not in env.tt.tasks
+    env.assert_quiet()
+    assert all(t["title"] != "Report" for t in env.ot.live())
+
+
 def test_bulk_guard_blocks_then_allow_bulk(env: Env) -> None:
     a, b = seed(env)
     env.max_destructive = 1

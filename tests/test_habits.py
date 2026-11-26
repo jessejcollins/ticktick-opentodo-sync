@@ -429,6 +429,15 @@ def test_unwritable_state_creates_no_habit(env: Env) -> None:
     assert not env.ot.writes and not env.tt.writes
 
 
+def test_unsupported_habit_is_warned_about_once(env: Env, caplog: pytest.LogCaptureFixture) -> None:
+    """The habit sync is rebuilt every pass, so "once per process" meant every 5 minutes."""
+    env.tt.add_habit("Water", type="Real", goal=8.0)
+    syncer = Syncer(env.tt, env.ot, env.state, now_ms=lambda: NOW)  # one process, two passes
+    syncer.run(dry_run=False)
+    syncer.run(dry_run=False)
+    assert caplog.text.count("TickTick habit 'Water' not synced") == 1
+
+
 def test_unsupported_and_archived_habits_are_left_alone(env: Env) -> None:
     env.tt.add_habit("Water", type="Real", goal=8.0)
     env.tt.add_habit("Old", status=1)

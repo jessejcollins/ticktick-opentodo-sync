@@ -202,6 +202,8 @@ class Syncer:
         self.max_deletes_per_day = max_deletes_per_day
         self.now_ms = now_ms
         self.run_id = str(now_ms())
+        self._habit_notes: set[str] = set()
+        """The habit sync's once-per-process warnings: it's rebuilt every pass, this isn't."""
 
     # --- fetch ------------------------------------------------------------------------
 
@@ -667,6 +669,7 @@ class Syncer:
                 now_ms=self.now_ms,
                 run_id=self.run_id,
                 max_destructive=self.max_destructive,
+                noted=self._habit_notes,
             ).run(
                 w.ot_habits,
                 w.ot_records,

@@ -91,13 +91,15 @@ class HabitSync:
         now_ms: Callable[[], int],
         run_id: str,
         max_destructive: int,
+        noted: set[str] | None = None,
     ) -> None:
         self.tt, self.ot, self.state = tt, ot, state
         self.timezone = timezone
         self.now_ms = now_ms
         self.run_id = run_id
         self.max_destructive = max_destructive
-        self._noted: set[str] = set()
+        self._noted = set() if noted is None else noted
+        """Warnings given already: owned by the caller, since a HabitSync lives one pass."""
 
     def run(
         self,
@@ -516,7 +518,7 @@ class HabitSync:
             )
 
     def _note(self, key: str, message: str) -> None:
-        """Log once per process (the loop runs every few minutes)."""
+        """Log once per process (the loop runs every few minutes): ``noted`` outlives the pass."""
         if key not in self._noted:
             self._noted.add(key)
             log.warning("%s", message)

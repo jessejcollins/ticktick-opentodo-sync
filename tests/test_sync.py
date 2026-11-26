@@ -14,7 +14,7 @@ from fakes import FakeOpenTodo, FakeTickTick, deny_writes
 from ticktick_opentodo_sync.http import ApiError
 from ticktick_opentodo_sync.opentodo import PLACEHOLDER
 from ticktick_opentodo_sync.state import State
-from ticktick_opentodo_sync.sync import PassResult, Syncer, deletes_in_last_day
+from ticktick_opentodo_sync.sync import CREATED_LABELS, PassResult, Syncer, deletes_in_last_day
 
 NY = "America/New_York"
 
@@ -102,6 +102,28 @@ def test_placeholder_project_name_is_repaired(env: Env) -> None:
     assert env.ot_by_title("Report")["project_id"] == pid
     assert [p["name"] for p in env.tt.projects_.values()] == ["Work"]
     env.assert_quiet()
+
+
+def test_placeholder_label_name_is_repaired(env: Env) -> None:
+    """Its tasks were skipped for good: labels had no repair (review #28)."""
+    _, report = seed(env)  # "Report" carries the new label "office"
+    (lid,) = env.ot.labels_
+    assert env.state.get_meta_json(CREATED_LABELS) == {lid: "office"}
+    env.ot.labels_[lid]["name"] = PLACEHOLDER  # a browser saved the placeholder back
+    env.tt.tasks[report]["title"] = "Q3 report"
+    res = env.run()
+    assert res.ok and res.ot.updated == 1, res.summary()
+    assert env.ot.labels_[lid]["name"] == "office"
+    assert env.ot_by_title("Q3 report")["labels"] == [lid]
+    assert env.state.get_meta_json(CREATED_LABELS) is None
+    env.assert_quiet()
+
+
+def test_created_labels_are_forgotten_once_seen(env: Env) -> None:
+    seed(env)
+    assert env.state.get_meta_json(CREATED_LABELS)
+    env.run()
+    assert env.state.get_meta_json(CREATED_LABELS) is None
 
 
 def test_dry_run_writes_nothing(env: Env) -> None:

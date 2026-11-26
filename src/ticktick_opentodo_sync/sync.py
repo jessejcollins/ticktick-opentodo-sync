@@ -35,6 +35,11 @@ from .state import ITEMS, State
 
 log = logging.getLogger(__name__)
 
+CREATED_LABELS = "ot_labels_created"
+"""Meta key: ``{label id: name}`` of OpenTodo labels this sync created and hasn't seen
+since. A browser can save the create placeholder over a new label's name; this is the name
+to put back."""
+
 
 class TickTickApi(Protocol):
     def preference_timezone(self) -> str | None: ...
@@ -70,6 +75,7 @@ class OpenTodoApi(Protocol):
     def restore_project(self, project_id: str) -> JSON: ...
     def labels(self) -> list[JSON]: ...
     def create_label(self, name: str) -> JSON: ...
+    def rename_label(self, label_id: str, name: str) -> JSON: ...
     def tasks(self) -> list[JSON]: ...
     def create_task(self, body: JSON, *, idempotency_key: str) -> JSON: ...
     def update_task(self, task_id: str, body: JSON) -> JSON: ...
@@ -167,6 +173,8 @@ class World:
     ot_project_ids: set[str] = field(default_factory=set)
     projects: ProjectPlan = field(default_factory=ProjectPlan)
     """List/project changes: planned by :meth:`Syncer.collect`, applied after the guards."""
+    label_renames: list[tuple[str, str]] = field(default_factory=list)
+    """(OpenTodo label id, name) of labels this sync created that hold the placeholder."""
     project_renames: list[tuple[str, str]] = field(default_factory=list)
     """(OpenTodo project id, name) of paired projects holding the create placeholder."""
     retiring: set[str] = field(default_factory=set)
@@ -412,6 +420,7 @@ class Syncer:
         them only in a fresh collect. Archiving waits for the end of the pass
         (:meth:`_retire_projects`).
         """
+        self._repair_labels(w, dry_run=dry_run)
         plan, verb = w.projects, "would " if dry_run else ""
         remote = bool(w.project_renames or plan.restore or plan.create_in_ot or plan.create_in_tt)
         if remote and not dry_run:
@@ -453,6 +462,30 @@ class Syncer:
                 name = w.project_names.get(PENDING_PREFIX + ot_id, ot_id)
                 log.info("would archive OpenTodo project %r: its TickTick list was deleted", name)
         return remote and not dry_run
+
+    def _repair_labels(self, w: World, *, dry_run: bool) -> None:
+        """Rename the labels that hold the placeholder back; forget the other created ones.
+
+        The placeholder race happens within a second of the create, so a label seen once
+        with its name needs no remembering. One that can't be renamed is tried next pass.
+        """
+        pending: dict[str, str] = {}
+        for lid, name in w.label_renames:
+            log.info(
+                "%srename OpenTodo label %s back to %r (it held the create placeholder)",
+                "would " if dry_run else "",
+                lid,
+                name,
+            )
+            if dry_run:
+                continue
+            try:
+                self.ot.rename_label(lid, name)
+            except Exception as exc:
+                log.warning("could not rename OpenTodo label %s back: %s", lid, exc)
+                pending[lid] = name
+        if not dry_run:
+            self.state.set_meta_json(CREATED_LABELS, pending or None)
 
     def _retire_projects(self, w: World, res: PassResult) -> None:
         """Archive the OpenTodo projects whose TickTick list was deleted; forget the pairs.
@@ -535,9 +568,16 @@ class Syncer:
     def _collect_ot(self, w: World, in_scope: set[str], ot_tasks: list[JSON]) -> list[JSON]:
         """Top-level OpenTodo tasks; returns the open subtasks for :meth:`_collect_subtasks`."""
         unreadable_labels: set[str] = set()
+        created = self.state.get_meta_json(CREATED_LABELS) or {}
         for label in self.ot.labels():
             if label.get("deleted_at") is not None or not label.get("id"):
                 continue
+            lid = str(label["id"])
+            if label.get("name") == PLACEHOLDER and not label.get(UNREADABLE) and lid in created:
+                # Its tasks were skipped for good. Read it as named, and rename it back once
+                # the guards have passed (as for projects).
+                w.label_renames.append((lid, str(created[lid])))
+                label = label | {"name": created[lid]}
             if _unreadable(label, "name"):
                 log.warning(
                     "OpenTodo label %s: name unreadable; its tasks are skipped", label["id"]
@@ -1076,6 +1116,9 @@ class Syncer:
                 created = self.ot.create_label(tag)
                 w.label_ids[tag] = str(created["id"])
                 w.mapper.label_names[w.label_ids[tag]] = tag
+                # Remembered until the next pass sees it (see _repair_labels).
+                mine = self.state.get_meta_json(CREATED_LABELS) or {}
+                self.state.set_meta_json(CREATED_LABELS, mine | {w.label_ids[tag]: tag})
 
     def _create_ot(self, a: Action, w: World) -> None:
         assert a.tt_id and a.task

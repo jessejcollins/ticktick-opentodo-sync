@@ -282,6 +282,11 @@ class FakeOpenTodo:
         self.labels_[lid] = {"id": lid, "name": name, "deleted_at": None}
         return copy.deepcopy(self.labels_[lid])
 
+    def rename_label(self, label_id: str, name: str) -> JSON:
+        self.writes.append(("rename_label", name))
+        self.labels_[label_id]["name"] = name
+        return copy.deepcopy(self.labels_[label_id])
+
     def tasks(self) -> list[JSON]:
         return [copy.deepcopy(t) for t in self.tasks_.values()]
 

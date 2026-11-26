@@ -43,6 +43,7 @@ def test_missing_required() -> None:
         ("OPENTODO_URL", "ot.example"),
         ("OPENTODO_URL", "ftp://ot.example"),
         ("OPENTODO_URL", "https://"),
+        ("OPENTODO_URL", "https://[::1"),  # urlsplit raised ValueError: a traceback
     ],
 )
 def test_invalid_values(key: str, value: str) -> None:

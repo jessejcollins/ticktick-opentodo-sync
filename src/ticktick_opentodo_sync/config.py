@@ -255,10 +255,14 @@ def _base_url(name: str, url: str, allow_http: bool, warnings: list[str]) -> str
     encryption key record (salt, iterations, wrapped key: enough to guess the passphrase
     offline). The URL is never echoed: it could carry credentials.
     """
-    parts = urlsplit(url)
-    if parts.scheme not in ("https", "http") or not parts.hostname:
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname
+    except ValueError:  # e.g. "https://[::1": a traceback instead of a config error
+        hostname = None
+    if not hostname or parts.scheme not in ("https", "http"):
         raise ConfigError(f"{name} must be a URL like https://todo.example.com")
-    if parts.scheme == "http" and not _loopback(parts.hostname):
+    if parts.scheme == "http" and not _loopback(hostname):
         if not allow_http:
             raise ConfigError(
                 f"{name} uses http://, which sends the token (and OpenTodo's encryption key "

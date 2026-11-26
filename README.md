@@ -134,10 +134,10 @@ Run commands from this directory: the sync reads `./.env` (or the file given wit
 
 To keep it running, pick one:
 
-- **cron:** run one pass every 5 minutes. With `TICKTICK_OPENTODO_SYNC_DRY_RUN=false` in `.env`, no flag is needed. Overlapping runs are safe: a run that finds another holding the lock waits, then exits with code 3.
+- **cron:** run one pass every 5 minutes. With `TICKTICK_OPENTODO_SYNC_DRY_RUN=false` in `.env`, no flag is needed. Overlapping runs are safe: a run that finds another holding the lock waits, then exits with code 3. The shell creates `sync.log`, so `umask 077` keeps it, and the task titles it holds, readable by you only.
 
   ```cron
-  */5 * * * * cd /path/to/ticktick-opentodo-sync && .venv/bin/ticktick-opentodo-sync >> sync.log 2>&1
+  */5 * * * * cd /path/to/ticktick-opentodo-sync && umask 077 && .venv/bin/ticktick-opentodo-sync >> sync.log 2>&1
   ```
 
 - **systemd:** let the sync loop on its own (`--loop`, one pass every `TICKTICK_OPENTODO_SYNC_INTERVAL` seconds) as a service. For example, `/etc/systemd/system/ticktick-opentodo-sync.service`:
@@ -273,10 +273,10 @@ State lives in the Docker volume `ticktick-opentodo-sync-data`, in `/data/tickti
 - a few settings;
 - the last-synced copy of each task (title, notes, dates…), used to tell which side changed.
 
-That last item is task content, decrypted, so treat the volume, and any copy of it, as private. `*.sqlite3*` and `*.log` files are gitignored, so a backup or a cron log made in the checkout can't be committed by accident.
+That last item is task content, decrypted, so treat the volume, and any copy of it, as private. `*.sqlite3*` and `*.log` files are gitignored, so a backup or a cron log made in the checkout can't be committed by accident. The backup stops the container first: a copy taken while a pass writes can be inconsistent.
 
 ```sh
-docker compose cp ticktick-opentodo-sync:/data/ticktick-opentodo-sync.sqlite3 ./backup.sqlite3   # backup
+docker compose stop && docker compose cp ticktick-opentodo-sync:/data/ticktick-opentodo-sync.sqlite3 ./backup.sqlite3 && docker compose start   # backup
 docker compose down && docker volume rm ticktick-opentodo-sync-data                              # full reset
 ```
 

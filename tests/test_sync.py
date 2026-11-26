@@ -913,6 +913,51 @@ def test_ticktick_subtask_goes_to_opentodo(env: Env) -> None:
     env.assert_quiet()
 
 
+def _trip(env: Env) -> tuple[str, str]:
+    parent = env.tt.add_task("Plan trip")
+    child = env.tt.add_task("Book hotel", parentId=parent)
+    assert env.run().ot.created == 2
+    return parent, child
+
+
+def test_subtask_completed_after_its_parent(env: Env) -> None:
+    """It stayed open in OpenTodo for good: out of scope once the parent was (review #27)."""
+    parent, child = _trip(env)
+    env.tt.tasks[parent]["status"] = 2
+    env.run()
+    env.tt.tasks[child]["status"] = 2
+    res = env.run()
+    assert res.ok and res.ot.completed == 1, res.summary()
+    assert env.ot_by_title("Book hotel")["completed_at"] is not None
+    env.assert_quiet()
+
+
+def test_subtask_completed_with_its_parent_whatever_the_row_order(env: Env) -> None:
+    """With the child's pair row first, the parent wasn't resolved yet (review #27)."""
+    parent, child = _trip(env)
+    env.state.put_pair(next(p for p in env.state.pairs() if p.tt_id == parent))  # row last
+    assert [p.tt_id for p in env.state.pairs()] == [child, parent]
+    env.tt.tasks[parent]["status"] = 2
+    env.tt.tasks[child]["status"] = 2
+    res = env.run()
+    assert res.ok and res.ot.completed == 2, res.summary()
+    env.assert_quiet()
+
+
+def test_subtask_of_a_completed_parent_completed_in_opentodo(env: Env) -> None:
+    parent, child = _trip(env)
+    env.tt.tasks[parent]["status"] = 2
+    env.run()
+    env.ot_by_title("Book hotel")["completed_at"] = 1
+    res = env.run()
+    assert res.ok and res.tt.completed == 1, res.summary()
+    assert env.tt.tasks[child]["status"] == 2
+    # A new subtask made in OpenTodo under the completed parent still isn't copied.
+    env.ot.add_task("Pack", None, parent_id=env.ot_by_title("Plan trip")["id"])
+    assert not env.run().tt.created
+    env.assert_quiet()
+
+
 def test_repeating_checklist_completed_in_opentodo(env: Env) -> None:
     tid = _checklist(
         env,

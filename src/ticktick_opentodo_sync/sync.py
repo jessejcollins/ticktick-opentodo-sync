@@ -174,6 +174,9 @@ class World:
     tasks are in scope (for the delete rules); new ones are never copied to TickTick."""
     failed_ot: set[str] = field(default_factory=set)
     """OpenTodo ids of tasks whose action failed this pass (their project isn't archived)."""
+    tt_waiting: set[str] = field(default_factory=set)
+    """TickTick subtasks out of scope only because their parent isn't open: see
+    :meth:`Syncer._adopt_children`."""
     tt_lists_alive: set[str] = field(default_factory=set)
     """TickTick lists a looked-up task was found in: they exist, listed or not."""
     ot_tasks_read: int = 0
@@ -301,6 +304,7 @@ class Syncer:
         self._collect_tt(world, [pid for pid in tt_projects if pid in in_scope], in_scope, dry_run)
         children = self._collect_ot(world, in_scope, ot_task_list)
         self._resolve_missing_tt(world, in_scope)
+        self._adopt_children(world, in_scope)
         self._refresh_tt_projects(world, dry_run=dry_run)
         self._collect_subtasks(world, children, in_scope)
         self._hold_retiring(world)
@@ -519,6 +523,8 @@ class Syncer:
                 or (parent and not self._top_level_tt(w, str(parent)))
             ):
                 w.tt.out_of_scope.add(tid)
+                if task is not None and parent and task.project in in_scope:
+                    w.tt_waiting.add(tid)  # the parent may be completed: decided later
             else:
                 w.tt.tasks[tid] = task
 
@@ -639,10 +645,15 @@ class Syncer:
                 continue
             w.ot_raw[oid] = raw
             task = self._normalize(w.mapper.from_ot, raw, "OpenTodo", oid)
+            # A paired subtask of a completed parent stays (see _adopt_children); a new one
+            # isn't copied under a completed parent.
+            parent_known = parent_tt in w.tt.tasks or (
+                oid in task_ot_ids and parent_tt in w.tt.unchanged
+            )
             if (
                 task is None
                 or task.project not in in_scope
-                or parent_tt not in w.tt.tasks
+                or not parent_known
                 or (task.project in w.retiring and oid not in task_ot_ids)
             ):
                 w.ot.out_of_scope.add(oid)
@@ -684,11 +695,42 @@ class Syncer:
             task = self._normalize(w.mapper.from_tt, raw, "TickTick", p.tt_id)
             if task is None or (raw.get("parentId") and raw["parentId"] not in w.tt.tasks):
                 w.tt.out_of_scope.add(p.tt_id)
+                if task is not None and raw.get("parentId"):
+                    # Its parent may be resolved later in this loop: decided after it.
+                    w.tt_raw[p.tt_id] = raw
+                    w.tt_waiting.add(p.tt_id)
             elif raw.get("status") in TT_DONE or task.project in in_scope:
                 w.tt_raw[p.tt_id] = raw
                 w.tt.tasks[p.tt_id] = task
             else:
                 w.tt.out_of_scope.add(p.tt_id)
+
+    def _adopt_children(self, w: World, in_scope: set[str]) -> None:
+        """Paired subtasks of a completed parent stay in scope, so their own completion syncs.
+
+        A subtask was in scope only while its parent was open in TickTick. Completed after
+        its parent, or with it when its pair row came first, it stayed open in OpenTodo for
+        good. Taken back: a paired subtask whose parent is a paired top-level task, completed
+        (fetched this pass, or known completed and unchanged).
+        """
+        for tid in sorted(w.tt_waiting):
+            raw = w.tt_raw.get(tid) or {}
+            parent = str(raw.get("parentId") or "")
+            parent_pair = w.pairs.get(parent)
+            if tid not in w.pairs or parent_pair is None:
+                continue
+            if parent in w.tt.tasks:
+                top_level = not (w.tt_raw.get(parent) or {}).get("parentId")
+            elif parent in w.tt.unchanged:
+                top_level = parent_pair.base is not None and parent_pair.base.parent is None
+            else:
+                continue  # deleted or out of scope: the subtask follows it
+            task = self._normalize(w.mapper.from_tt, raw, "TickTick", tid)
+            if not top_level or task is None:
+                continue
+            if raw.get("status") in TT_DONE or task.project in in_scope:
+                w.tt.out_of_scope.discard(tid)
+                w.tt.tasks[tid] = task
 
     @staticmethod
     def _normalize(fn: Callable[[JSON], Task], raw: JSON, side: str, task_id: str) -> Task | None:

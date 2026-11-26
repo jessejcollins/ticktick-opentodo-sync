@@ -144,7 +144,7 @@ Settled answers from the build. Dates are when they were decided or learned.
 - **Conflicts:** TickTick wins every field except completion. A completion made on either side is never undone by a conflict ("Completed in either app" takes priority).
 - **Subtasks (2026-11-22).** One level deep on both sides; deeper levels are ignored.
   - TickTick **checklist items** ↔ OpenTodo **subtasks**, including checked items (as completed subtasks). Items have their own pair table (`item_pairs`; `tt_project` = TickTick parent id) and sync title and done state only. Order is copied on create (`sortOrder` → `position`), not afterwards. Items sync only while the parent is open and paired on both sides.
-  - TickTick **child tasks** (`parentId`) ↔ OpenTodo subtasks as full tasks (`Task.parent`).
+  - TickTick **child tasks** (`parentId`) ↔ OpenTodo subtasks as full tasks (`Task.parent`). A paired one stays in scope while its parent is completed, so completing it afterwards syncs (2026-11-26); a new one isn't copied under a completed parent.
   - A **new OpenTodo subtask** becomes a checklist item under a TickTick CHECKLIST task, otherwise a TickTick child task (each app keeps its natural form). Subtasks of a brand-new parent follow one pass later.
   - Item conflicts: TickTick wins outright, done state included (a repeating TickTick checklist resets its items, which must not be re-ticked from OpenTodo). After a repeating task is completed in OpenTodo, its items are resynced from TickTick on the next pass.
   - The bulk guard counts item deletions in TickTick, not in OpenTodo (OpenTodo's copies can be recreated).

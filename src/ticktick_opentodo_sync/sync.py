@@ -104,6 +104,9 @@ class PassResult:
     """Habits: created/updated definitions, check-ins added (completed) and cleared (deleted)."""
     conflicts: int = 0
     errors: int = 0
+    ot_tasks_read: int = 0
+    """Tasks OpenTodo sent (open, completed, trashed, habit days): a count that only grows,
+    all of it held in memory each pass (the container has 128 MB)."""
     blocked: str | None = None
     """A bulk guard tripped and what it guards wasn't written: nothing at all for the task
     guards, the habit check-ins for the habit guard (which runs after the task pass)."""
@@ -125,7 +128,8 @@ class PassResult:
             f"{prefix}TickTick: {self.tt} | OpenTodo: {self.ot} | "
             f"items TickTick: {self.tt_items} | items OpenTodo: {self.ot_items} | "
             f"habits TickTick: {self.habits_tt} | habits OpenTodo: {self.habits_ot} | "
-            f"conflicts={self.conflicts} errors={self.errors}"
+            f"conflicts={self.conflicts} errors={self.errors} | "
+            f"OpenTodo tasks read={self.ot_tasks_read}"
         )
         if self.blocked:
             line += " | BLOCKED"
@@ -167,6 +171,7 @@ class World:
     retiring: set[str] = field(default_factory=set)
     """Project keys of OpenTodo projects whose TickTick list was deleted: only their paired
     tasks are in scope (for the delete rules); new ones are never copied to TickTick."""
+    ot_tasks_read: int = 0
 
 
 class SyncRefusedError(Exception):
@@ -280,6 +285,7 @@ class Syncer:
             projects=plan,
             project_renames=renames,
             retiring={PENDING_PREFIX + ot_id for _, ot_id in plan.retire},
+            ot_tasks_read=len(ot_task_list),
         )
         for pair in world.pairs.values():
             mapper.link_task(pair.tt_id, pair.ot_id)
@@ -631,11 +637,13 @@ class Syncer:
     def run(self, *, dry_run: bool, allow_bulk: bool = False) -> PassResult:
         res = PassResult(dry_run=dry_run)
         w = self.collect(dry_run=dry_run)
+        res.ot_tasks_read = w.ot_tasks_read
         planned = self._plan_pass(w, res, dry_run=dry_run, allow_bulk=allow_bulk)
         # Lists and projects change only once the guards have passed. Created, renamed or
         # restored ones change what tasks map to, so the pass then starts over (once).
         if planned is not None and self._apply_projects(w, dry_run=dry_run):
             w = self.collect(dry_run=dry_run)
+            res.ot_tasks_read = w.ot_tasks_read
             planned = self._plan_pass(w, res, dry_run=dry_run, allow_bulk=allow_bulk)
             if planned is not None:
                 self._apply_projects(w, dry_run=dry_run)  # normally nothing left to do

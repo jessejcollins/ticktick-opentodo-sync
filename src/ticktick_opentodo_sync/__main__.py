@@ -14,6 +14,7 @@ import dataclasses
 import json
 import logging
 import os
+import resource
 import signal
 import sqlite3
 import sys
@@ -140,6 +141,32 @@ def _build(cfg: Config) -> tuple[Syncer, State, list[Http]]:
     return syncer, state, [tt_http, ot_http]
 
 
+MEMORY_LIMIT_FILES = ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes")
+"""Where the container's memory limit is: cgroup v2, then v1."""
+MEMORY_WARN_SHARE = 0.8
+
+
+def peak_memory_mb() -> int:
+    """This process's peak resident memory so far (Linux reports it in KiB)."""
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
+
+
+def memory_limit_mb(files: Sequence[str] = MEMORY_LIMIT_FILES) -> int | None:
+    """The memory limit of the container this runs in, or None when there's none to read.
+
+    Every pass holds OpenTodo's whole task list, which only grows. Showing the peak next to
+    the limit (compose sets 128 MB) shows the headroom before an OOM kill.
+    """
+    for name in files:
+        try:
+            text = Path(name).read_text().strip()
+        except OSError:
+            continue
+        # "max" (v2) or a value near 2**63 (v1) means no limit.
+        return int(text) // (1024 * 1024) if text.isdigit() and int(text) < 1 << 50 else None
+    return None
+
+
 def _write_heartbeat(cfg: Config, payload: dict[str, Any]) -> None:
     path = cfg.heartbeat_path
     if path is None:
@@ -179,8 +206,20 @@ def _one_pass(cfg: Config, syncer: Syncer, args: argparse.Namespace, dry_run: bo
             },
         )
         return EXIT_ERROR
-    log.info("%s (%.1fs)", result.summary(), time.time() - started)
-    _write_heartbeat(cfg, {"at": time.time(), "interval": cfg.interval} | result.to_json())
+    peak, limit = peak_memory_mb(), memory_limit_mb()
+    memory = f"memory peak {peak} MB" + (f" of {limit} MB" if limit else "")
+    log.info("%s (%.1fs, %s)", result.summary(), time.time() - started, memory)
+    if limit and peak > limit * MEMORY_WARN_SHARE:
+        log.warning(
+            "memory peak %d MB is close to the %d MB limit: OpenTodo's task list grows "
+            "(%d read); see README, Running next to Pi-hole",
+            peak,
+            limit,
+            result.ot_tasks_read,
+        )
+    _write_heartbeat(
+        cfg, {"at": time.time(), "interval": cfg.interval, "peak_mb": peak} | result.to_json()
+    )
     if result.blocked or result.refused:
         return EXIT_BLOCKED
     return EXIT_ERROR if result.errors else EXIT_OK
@@ -230,7 +269,8 @@ def _status(cfg: Config) -> int:
         hb = _read_heartbeat(cfg)
         if hb:
             when = datetime.fromtimestamp(hb.get("at", 0), UTC).isoformat(timespec="seconds")
-            print(f"last pass:        {when} ok={hb.get('ok')} dry_run={hb.get('dry_run')}")
+            memory = f" memory peak {hb['peak_mb']} MB" if "peak_mb" in hb else ""
+            print(f"last pass:        {when} ok={hb.get('ok')} dry_run={hb.get('dry_run')}{memory}")
             if hb.get("error"):
                 print(f"  error:          {hb['error']}")
         last = state.get_meta_json("last_change")

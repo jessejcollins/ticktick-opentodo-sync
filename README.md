@@ -178,7 +178,7 @@ git pull && docker compose up -d --build                                     # u
 Each pass logs the changes it made and one summary line:
 
 ```text
-INFO TickTick: created=0 updated=1 completed=0 deleted=0 | OpenTodo: created=2 updated=0 completed=1 deleted=0 | items TickTick: created=0 updated=0 completed=0 deleted=0 | items OpenTodo: created=0 updated=1 completed=0 deleted=0 | habits TickTick: created=0 updated=0 completed=1 deleted=0 | habits OpenTodo: created=0 updated=0 completed=0 deleted=0 | conflicts=0 errors=0 (11.2s)
+INFO TickTick: created=0 updated=1 completed=0 deleted=0 | OpenTodo: created=2 updated=0 completed=1 deleted=0 | items TickTick: created=0 updated=0 completed=0 deleted=0 | items OpenTodo: created=0 updated=1 completed=0 deleted=0 | habits TickTick: created=0 updated=0 completed=1 deleted=0 | habits OpenTodo: created=0 updated=0 completed=0 deleted=0 | conflicts=0 errors=0 | OpenTodo tasks read=812 (11.2s, memory peak 41 of 128 MB)
 ```
 
 `items` are checklist items and subtasks. For `habits`, `completed` and `deleted` count check-ins added and cleared.
@@ -256,6 +256,7 @@ The service is built to share a small host:
 - **Lockdown:** the root filesystem is read-only, with `cap_drop: ALL`, `no-new-privileges` and no published ports.
 - **Writes:** it only writes to its data volume (SQLite, and only when something changed) and two small tmpfs mounts.
 - **Logs:** Docker logs rotate at 3 × 1 MB.
+- **Memory:** each pass holds OpenTodo's whole task list in memory, completed and trashed tasks and every habit day included, and that list only grows. The summary line shows how many tasks were read and the peak memory against the 128 MB limit, and a warning appears past 80%. If it gets there, raise `mem_limit` (and `memswap_limit`) in `compose.yaml`, or empty OpenTodo's Trash.
 
 **DNS:** Docker can't forward to a `127.0.0.1` resolver. If the host's own `resolv.conf` points at Pi-hole on loopback, containers fall back to public DNS. To resolve through Pi-hole, uncomment `dns:` in [compose.yaml](compose.yaml) and set it to the host's LAN address.
 

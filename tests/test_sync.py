@@ -80,6 +80,15 @@ def test_seed_creates_everything_in_opentodo(env: Env) -> None:
     env.assert_quiet()
 
 
+def test_summary_counts_the_opentodo_tasks_read(env: Env) -> None:
+    """All of them are held in memory every pass, and the count only grows."""
+    seed(env)
+    env.ot.delete_task(env.ot_by_title("Inbox thing")["id"])  # trashed: still sent
+    res = env.run()
+    assert res.ot_tasks_read == len(env.ot.tasks_) == 2
+    assert "OpenTodo tasks read=2" in res.summary()
+
+
 def test_placeholder_project_name_is_repaired(env: Env) -> None:
     """A browser saved the create placeholder over a paired project's name."""
     seed(env)

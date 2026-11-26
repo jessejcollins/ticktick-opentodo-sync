@@ -966,6 +966,31 @@ def test_a_write_deferred_every_pass_becomes_an_error(
     env.assert_quiet()
 
 
+def test_item_write_keeps_a_tick_made_during_the_pass(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The item's planned state was written over a tick made meanwhile (review #32)."""
+    tid = _checklist(env)
+    subtasks(env, "Pack")["Socks"]["title"] = "Wool socks"  # renamed in OpenTodo
+    tt_items(env, tid)["Shirts"]["title"] = "Tees"  # an item that didn't change meanwhile
+    check_writable = State.check_writable
+
+    def ticked_meanwhile(state: State) -> None:
+        tt_items(env, tid)["Socks"]["status"] = 1  # ticked in TickTick during the pass
+        check_writable(state)
+
+    monkeypatch.setattr(State, "check_writable", ticked_meanwhile)
+    res = env.run()
+    monkeypatch.undo()
+    assert res.ok and res.ot_items.updated == 1 and not res.tt_items.updated, res.summary()
+    assert tt_items(env, tid)["Socks"]["status"] == 1  # kept
+    res = env.run()  # both changed: TickTick wins, tick included
+    assert res.ok and res.conflicts == 1, res.summary()
+    assert tt_items(env, tid)["Socks"]["status"] == 1
+    assert subtasks(env, "Pack")["Socks"]["completed_at"] is not None
+    env.assert_quiet()
+
+
 def test_checklist_items_become_subtasks(env: Env) -> None:
     _checklist(env)
     subs = subtasks(env, "Pack")

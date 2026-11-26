@@ -1390,7 +1390,7 @@ class Syncer:
                 self._apply_item_ot(a, w, res)
         for parent, group in to_tt.items():
             try:
-                self._apply_items_tt(parent, group, w)
+                applied = self._apply_items_tt(parent, group, w)
             except sqlite3.Error:
                 raise  # see _apply
             except Exception as exc:
@@ -1398,7 +1398,7 @@ class Syncer:
                 log.error("failed to update checklist of %s: %s", parent, exc)  # noqa: TRY400
                 log.debug("traceback", exc_info=True)
                 continue
-            for a in group:
+            for a in applied:
                 log.info("%s", self._describe_item(a, w))
                 _count_item(a, res)
 
@@ -1474,8 +1474,13 @@ class Syncer:
             table=ITEMS,
         )
 
-    def _apply_items_tt(self, parent: str, group: list[Action], w: World) -> None:
-        """All of one task's item changes in one TickTick write (items live in the task)."""
+    def _apply_items_tt(self, parent: str, group: list[Action], w: World) -> list[Action]:
+        """All of one task's item changes in one TickTick write (items live in the task).
+
+        Returns the actions applied. An item changed in TickTick since the pass read it is
+        left for the next pass, as whole tasks are (see _update_tt): its planned state was
+        written over the change (a tick made meanwhile was undone, for good).
+        """
         pair = w.pairs[parent]
         project = str((w.tt_raw.get(parent) or {}).get("projectId") or pair.tt_project)
         raw = self.tt.get_task(project, parent)  # fresh: a task action may have written it
@@ -1484,6 +1489,9 @@ class Syncer:
         items: list[JSON] = [dict(i) for i in raw.get("items") or [] if isinstance(i, dict)]
         by_id = {str(i.get("id")): i for i in items}
         old_ids = set(by_id)
+        group = [a for a in group if not self._item_changed_meanwhile(a, by_id, parent, w)]
+        if not group:
+            return []
         creates: list[Action] = []
         next_order = max((i.get("sortOrder") or 0 for i in items), default=0)
         for a in group:
@@ -1538,6 +1546,21 @@ class Syncer:
                 ),
                 table=ITEMS,
             )
+        return group
+
+    def _item_changed_meanwhile(
+        self, a: Action, fresh: dict[str, JSON], parent: str, w: World
+    ) -> bool:
+        if a.kind not in (Kind.UPDATE_TT, Kind.DELETE_TT):
+            return False
+        then, now = w.tt_item_raw.get(a.tt_id or ""), fresh.get(a.tt_id or "")
+        if then is None or now is None or item_from_tt(now, parent) == item_from_tt(then, parent):
+            return False
+        log.info(
+            "left for the next pass: %s (changed in TickTick since this pass read it)",
+            self._describe_item(a, w),
+        )
+        return True
 
     # --- reports ----------------------------------------------------------------------
 

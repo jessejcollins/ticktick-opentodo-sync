@@ -369,8 +369,11 @@ class Syncer:
         """The habit sync's OpenTodo project when its id isn't in the state (after a reset).
 
         Without it, the old "Habits" project read as an ordinary project and was turned into
-        a TickTick list. Taken back: a live project named "Habits" that holds open habits.
+        a TickTick list. Taken back: a live project named "Habits" that holds open habits,
+        and isn't paired with a TickTick list: that one is the list's (a list called "Habits"
+        with a habit made in its project), and taking it froze the list's tasks.
         """
+        paired = set(self.state.project_pairs().values())
         holding = {
             str(t["project_id"])
             for t in tasks
@@ -383,6 +386,7 @@ class Syncer:
             pid = str(p.get("id") or "")
             if (
                 pid in holding
+                and pid not in paired
                 and p.get("deleted_at") is None
                 and str(p.get("name") or "").strip().casefold() == HABITS_PROJECT.casefold()
             ):

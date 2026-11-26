@@ -278,7 +278,7 @@ docker compose cp ticktick-opentodo-sync:/data/ticktick-opentodo-sync.sqlite3 ./
 docker compose down && docker volume rm ticktick-opentodo-sync-data                              # full reset
 ```
 
-After a reset, every task looks new on both sides. Empty OpenTodo or use `--match-existing` before syncing again. Habits are paired again by name on the next pass, and the **Habits** project is recognised again: a project with that name holding habits.
+After a reset, every task looks new on both sides. Empty OpenTodo or use `--match-existing` before syncing again. Habits are paired again by name on the next pass, and the **Habits** project is recognised again: a project with that name holding habits, unless it belongs to a TickTick list of that name.
 
 ## Development
 

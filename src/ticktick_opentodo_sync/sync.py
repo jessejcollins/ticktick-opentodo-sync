@@ -185,6 +185,8 @@ class World:
     tt_waiting: set[str] = field(default_factory=set)
     """TickTick subtasks out of scope only because their parent isn't open: see
     :meth:`Syncer._adopt_children`."""
+    deferred: dict[str, int] = field(default_factory=dict)
+    """TickTick id -> passes in a row its write has been deferred, this one included."""
     tt_lists_alive: set[str] = field(default_factory=set)
     """TickTick lists a looked-up task was found in: they exist, listed or not."""
     ot_tasks_read: int = 0
@@ -222,6 +224,8 @@ class Syncer:
         self.max_updates = max_updates
         self.now_ms = now_ms
         self.run_id = str(now_ms())
+        self._deferrals: dict[str, int] = {}
+        """TickTick id -> passes in a row its write was deferred, as of the last pass."""
         self._habit_notes: set[str] = set()
         """The habit sync's once-per-process warnings: it's rebuilt every pass, this isn't."""
 
@@ -803,8 +807,11 @@ class Syncer:
 
         if not dry_run and (actions or item_actions):
             self.state.check_writable()
+        self._deferrals = self.state.get_meta_json(DEFERRED) or {}
         for a in actions:
             self._apply(a, w, res, dry_run=dry_run)
+        if not dry_run:  # written only while something is deferred (SD card)
+            self.state.set_meta_json(DEFERRED, w.deferred or None)
         self._apply_items(item_actions, w, res, dry_run=dry_run)
         if not dry_run:
             self._retire_projects(w, res)
@@ -1144,7 +1151,20 @@ class Syncer:
             raise
         except ChangedDuringPassError as exc:
             # Nothing written, nothing recorded: the next pass plans it again with the edit.
-            log.info("left for the next pass: %s (%s)", desc, exc)
+            assert a.tt_id
+            w.deferred[a.tt_id] = self._deferrals.get(a.tt_id, 0) + 1
+            if w.deferred[a.tt_id] < DEFERRALS_BEFORE_ERROR:
+                log.info("left for the next pass: %s (%s)", desc, exc)
+                return
+            # A real edit is picked up by the next pass. Every pass in a row means the two
+            # TickTick endpoints disagree on an unchanged task: the write never happens.
+            res.errors += 1
+            log.warning(
+                "left for the next pass %d times in a row, so probably not an edit: %s (%s)",
+                w.deferred[a.tt_id],
+                desc,
+                exc,
+            )
             return
         except Exception as exc:
             res.errors += 1
@@ -1254,8 +1274,11 @@ class Syncer:
         raw = self.tt.get_task(project, a.tt_id)
         if raw is None:
             raise RuntimeError("TickTick task no longer exists")
-        if collected is not None and _tt_view(w, raw) != _tt_view(w, collected):
-            raise ChangedDuringPassError("changed in TickTick since this pass read it")
+        if collected is not None and (now := _tt_view(w, raw)) != (then := _tt_view(w, collected)):
+            fields = changed_fields(then[0], now[0]) + (["checklist"] if now[1] != then[1] else [])
+            raise ChangedDuringPassError(
+                f"changed in TickTick since this pass read it: {', '.join(fields)}"
+            )
         target = w.mapper.tt_project_id(a.task.project)
         if raw.get("projectId") != target:
             self.tt.move_task(a.tt_id, str(raw.get("projectId") or pair.tt_project), target)
@@ -1655,6 +1678,9 @@ def _count(a: Action, res: PassResult) -> None:
 
 
 DAY_MS = 24 * 60 * 60 * 1000
+DEFERRED = "deferred"
+"""Meta key: ``{TickTick id: passes in a row}`` of writes left for the next pass."""
+DEFERRALS_BEFORE_ERROR = 3
 DAILY_GUARD = "daily"
 """``blocked`` meta ``guard`` of the daily delete cap: it holds until --allow-bulk."""
 RECENT_DELETES = "recent_deletes"
@@ -1699,7 +1725,8 @@ def _tt_view(w: World, raw: JSON) -> tuple[Task, list[tuple[str, str, object]]]:
     Normalized, so the list and single-task endpoints compare equal when nothing changed.
     """
     items = [
-        (str(i.get("id")), str(i.get("title") or ""), i.get("status"))
+        # A missing status is unchecked, as for the other fields' missing values.
+        (str(i.get("id")), str(i.get("title") or ""), i.get("status") or 0)
         for i in raw.get("items") or []
         if isinstance(i, dict)
     ]

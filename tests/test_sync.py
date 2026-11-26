@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -914,6 +915,54 @@ def test_whole_task_write_keeps_a_tick_made_during_the_pass(
     assert res.tt.updated == 1, res.summary()
     assert env.tt.tasks[tid]["dueDate"] and tt_items(env, tid)["Socks"]["status"] == 1
     assert subtasks(env, "Pack")["Socks"]["completed_at"] is not None
+    env.assert_quiet()
+
+
+def test_item_status_left_out_by_one_endpoint_isnt_a_change(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unchecked item without ``status`` read as changed: deferred every pass (review #31)."""
+    tid = _checklist(env)
+    get_task = FakeTickTick.get_task
+
+    def without_default_status(self: FakeTickTick, project_id: str, task_id: str) -> Any:
+        raw = get_task(self, project_id, task_id)
+        if raw and raw.get("items"):
+            raw["items"] = [
+                {k: v for k, v in i.items() if not (k == "status" and v == 0)} for i in raw["items"]
+            ]
+        return raw
+
+    monkeypatch.setattr(FakeTickTick, "get_task", without_default_status)
+    env.ot_by_title("Pack")["priority"] = 1  # edited in OpenTodo
+    res = env.run()
+    assert res.ok and res.tt.updated == 1, res.summary()
+    assert env.tt.tasks[tid]["priority"] == 5
+
+
+def test_a_write_deferred_every_pass_becomes_an_error(
+    env: Env, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Deferred forever at INFO, with health green: the write never happened (review #31)."""
+    _, report = seed(env)
+    get_task = FakeTickTick.get_task
+
+    def disagrees(self: FakeTickTick, project_id: str, task_id: str) -> Any:
+        raw = get_task(self, project_id, task_id)
+        return raw and raw | {"title": raw["title"] + "!"}  # never as the listing says
+
+    monkeypatch.setattr(FakeTickTick, "get_task", disagrees)
+    env.ot_by_title("Report")["priority"] = 3  # edited in OpenTodo
+    assert env.run().ok and env.run().ok  # could be edits in TickTick meanwhile
+    assert env.state.get_meta_json("deferred") == {report: 2}
+    with caplog.at_level(logging.WARNING):
+        res = env.run()
+    assert res.errors == 1 and not res.tt.updated, res.summary()
+    assert "3 times in a row" in caplog.text and "title" in caplog.text
+    monkeypatch.undo()
+    res = env.run()
+    assert res.ok and res.tt.updated == 1, res.summary()
+    assert env.state.get_meta_json("deferred") is None
     env.assert_quiet()
 
 

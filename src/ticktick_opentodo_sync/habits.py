@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
@@ -265,6 +266,40 @@ def plan_habits(
     return out
 
 
+def match_habits(
+    pairs: Iterable[HabitPair], tt: Mapping[str, HabitDef], ot: Mapping[str, HabitDef]
+) -> tuple[list[tuple[str, str]], set[str]]:
+    """Unpaired habits with the same name on both sides: pair them, don't copy each over.
+
+    After a state reset every habit is unpaired, and copying them would duplicate each one
+    on both sides (TickTick habits can't be deleted through the API). Returns the
+    (TickTick id, OpenTodo id) matches, and the names (casefolded) on both sides that aren't
+    unique on one of them: ambiguous, so neither side's copies are made.
+    """
+    pairs = list(pairs)
+    paired_tt, paired_ot = {p.tt_id for p in pairs}, {p.ot_id for p in pairs}
+    tt_names: dict[str, list[str]] = {}
+    for tt_id, h in sorted(tt.items()):
+        if tt_id not in paired_tt:
+            tt_names.setdefault(name_key(h.name), []).append(tt_id)
+    ot_names: dict[str, list[str]] = {}
+    for ot_id, h in sorted(ot.items()):
+        if ot_id not in paired_ot:
+            ot_names.setdefault(name_key(h.name), []).append(ot_id)
+    matches: list[tuple[str, str]] = []
+    ambiguous: set[str] = set()
+    for key in sorted(tt_names.keys() & ot_names.keys()):
+        if len(tt_names[key]) == 1 and len(ot_names[key]) == 1:
+            matches.append((tt_names[key][0], ot_names[key][0]))
+        else:
+            ambiguous.add(key)
+    return matches, ambiguous
+
+
+def name_key(name: str) -> str:
+    return name.strip().casefold()
+
+
 class DKind(Enum):
     CHECK_OT = "check_ot"
     CLEAR_OT = "clear_ot"
@@ -289,12 +324,18 @@ def plan_days(
     tt_done: set[tuple[str, str]],
     ot_done: set[tuple[str, str]],
     base: set[tuple[str, str]],
+    *,
+    refused: AbstractSet[tuple[str, str]] = frozenset(),
 ) -> list[DayAction]:
     """Check-ins of (TickTick id, OpenTodo id) pairs on ``days`` (oldest first).
 
     With one boolean per side, the sides can only disagree when exactly one of them moved
     away from ``base``, so there is no conflict to resolve. A new pair has an empty base:
     the side that has check-ins copies them over (the first-run backfill).
+
+    ``refused``: (TickTick id, day) check-ins OpenTodo would not record (a day before the
+    habit's first one there). They stay in TickTick only and aren't offered again; they
+    never enter ``base``, so the gap in OpenTodo doesn't read as an un-check there.
     """
     out: list[DayAction] = []
     for tt_id, ot_id in pairs:
@@ -304,6 +345,8 @@ def plan_days(
                 if t != b:
                     out.append(DayAction(DKind.RECORD, tt_id, ot_id, day, t))
             elif t != b:
+                if t and (tt_id, day) in refused:
+                    continue
                 out.append(DayAction(DKind.CHECK_OT if t else DKind.CLEAR_OT, tt_id, ot_id, day, t))
             else:
                 out.append(DayAction(DKind.CHECK_TT if o else DKind.CLEAR_TT, tt_id, ot_id, day, o))

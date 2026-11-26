@@ -70,7 +70,7 @@ Fill in:
 | Variable | Where to get it |
 |---|---|
 | `TICKTICK_TOKEN` | TickTick web → avatar → **Settings → Account → API Token** |
-| `OPENTODO_URL` | Your OpenTodo server, e.g. `https://todo.example.com` (without `/api/v1`) |
+| `OPENTODO_URL` | Your OpenTodo server, e.g. `https://todo.example.com` (without `/api/v1`). Plain `http://` is refused except to `localhost`, because the token would travel unencrypted. For a server on a network you trust, see `TICKTICK_OPENTODO_SYNC_ALLOW_HTTP` in [.env.example](.env.example) |
 | `OPENTODO_TOKEN` | OpenTodo → **Settings → Integrations → API tokens**, scope **full** (`agent` tokens are limited to 30 writes a minute) |
 | `OPENTODO_ENCRYPTION_RECOVERY_KEY` *or* `OPENTODO_ENCRYPTION_PASSPHRASE` | Only if OpenTodo end-to-end encryption is on. See [below](#opentodo-end-to-end-encryption) |
 
@@ -118,12 +118,13 @@ If you'd rather not run Docker, the sync is an ordinary Python package with two 
 git clone https://github.com/jessejcollins/ticktick-opentodo-sync.git
 cd ticktick-opentodo-sync
 python3 -m venv .venv
-.venv/bin/pip install .
+.venv/bin/pip install --require-hashes -r requirements.lock   # the exact, verified versions
+.venv/bin/pip install --no-deps --no-build-isolation .
 cp .env.example .env && chmod 600 .env
 $EDITOR .env
 ```
 
-Run commands from this directory: the sync reads `./.env` (or the file given with `--env-file`) and keeps its state in `./state/`. Set `TICKTICK_OPENTODO_SYNC_STATE_DIR` in `.env` to keep state somewhere else. The [first run](#first-run) steps are the same, minus the `docker compose run --rm` prefix:
+Run commands from this directory: the sync reads `./.env` (or the file given with `--env-file`) and keeps its state in `./state/`. Set `TICKTICK_OPENTODO_SYNC_STATE_DIR` in `.env` to keep state somewhere else. The state holds decrypted task content, so the sync makes its files readable by your user only. The [first run](#first-run) steps are the same, minus the `docker compose run --rm` prefix:
 
 ```sh
 .venv/bin/ticktick-opentodo-sync --dry-run
@@ -162,7 +163,7 @@ To keep it running, pick one:
 
   Then `sudo systemctl enable --now ticktick-opentodo-sync` and follow it with `journalctl -u ticktick-opentodo-sync -f`.
 
-Docker adds the resource limits and lockdown described in [Running next to Pi-hole](#running-next-to-pi-hole) and the `(healthy)`/`(unhealthy)` status. Without Docker, keep an eye on the log and exit codes instead. To update, `git pull` and run `.venv/bin/pip install .` again.
+Docker adds the resource limits and lockdown described in [Running next to Pi-hole](#running-next-to-pi-hole) and the `(healthy)`/`(unhealthy)` status. Without Docker, keep an eye on the log and exit codes instead. To update, `git pull` and run the two `pip install` lines again.
 
 ## Day to day
 
@@ -177,7 +178,7 @@ git pull && docker compose up -d --build                                     # u
 Each pass logs the changes it made and one summary line:
 
 ```text
-INFO TickTick: created=0 updated=1 completed=0 deleted=0 | OpenTodo: created=2 updated=0 completed=1 deleted=0 | items TickTick: created=0 updated=0 completed=0 deleted=0 | items OpenTodo: created=0 updated=1 completed=0 deleted=0 | habits TickTick: created=0 updated=0 completed=1 deleted=0 | habits OpenTodo: created=0 updated=0 completed=0 deleted=0 | conflicts=0 errors=0 (11.2s)
+INFO TickTick: created=0 updated=1 completed=0 deleted=0 | OpenTodo: created=2 updated=0 completed=1 deleted=0 | items TickTick: created=0 updated=0 completed=0 deleted=0 | items OpenTodo: created=0 updated=1 completed=0 deleted=0 | habits TickTick: created=0 updated=0 completed=1 deleted=0 | habits OpenTodo: created=0 updated=0 completed=0 deleted=0 | conflicts=0 errors=0 | OpenTodo tasks read=812 (11.2s, memory peak 41 of 128 MB)
 ```
 
 `items` are checklist items and subtasks. For `habits`, `completed` and `deleted` count check-ins added and cleared.
@@ -192,7 +193,11 @@ If a pass would delete or complete more than `TICKTICK_OPENTODO_SYNC_MAX_DESTRUC
 docker compose run --rm ticktick-opentodo-sync --apply --allow-bulk
 ```
 
-The same limit applies to habit check-ins being cleared in TickTick.
+The same limit applies to habit check-ins being cleared, in either app: those block the same way, after the task changes of that pass are written.
+
+Deletions are also limited over time. If a pass would take the deletions of the last 24 hours past `TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY` (default 50), it blocks the same way. This catches a fault that deletes a few tasks every pass and so never trips the per-pass limit. Deletions you approve with `--allow-bulk` don't count. `--status` shows the count so far: `deletes (24 h): 3 of 50`.
+
+New tasks are limited per pass too, through `TICKTICK_OPENTODO_SYNC_MAX_CREATES` (default 50, not applied to the first seed). Many new tasks at once most likely means lost pairs, for example an older state backup restored: every task made since would be duplicated in both apps. A legitimate bulk add, such as a large template, goes through with `--allow-bulk`.
 
 ### Exit codes
 
@@ -201,6 +206,7 @@ The same limit applies to habit check-ins being cleared in TickTick.
 ## How it behaves
 
 - **Change detection:** neither API can list only what changed, so each pass reads all open TickTick tasks (one request per list) and all OpenTodo tasks. Each pair of tasks stores a fingerprint of both sides from the last pass. After every write the new fingerprint is saved at once, so the sync never mistakes its own writes for your edits.
+- **State file:** before a pass writes to either app, it checks that it can write its state file. If it can't (a full disk, a failing SD card), the pass stops there, writes nothing to either app, and the container shows unhealthy until the file can be written again.
 - **Conflicts:** if both sides changed, TickTick's version overwrites OpenTodo, logged as `WARNING … [conflict]`. Completion is the exception: a task completed on either side stays completed.
 - **Deletes:** deleting in TickTick moves the OpenTodo task to its Trash. Deleting in OpenTodo deletes in TickTick, unless the task was also edited in TickTick since the last pass; then TickTick wins and the task is recreated in OpenTodo.
 - **Completed tasks:** TickTick's API only lists open tasks. When a paired task disappears, the sync fetches it once to tell *completed* from *deleted*.
@@ -209,9 +215,13 @@ The same limit applies to habit check-ins being cleared in TickTick.
   - **Completing in TickTick** records that occurrence as completed in OpenTodo, and OpenTodo moves on to TickTick's next date. Rescheduling in TickTick just moves the date.
   - **Skipping in OpenTodo** moves the TickTick date.
   - **"After completion" rules** always just move the date.
+- **Lists and projects:** matched by name, then by ID; a list or project that exists on one side only is created on the other.
+  - Deleting a list in TickTick archives its OpenTodo project, after its tasks have gone to OpenTodo's Trash through the bulk-delete guard.
+  - Deleting a project in OpenTodo brings it back from the Trash with its tasks (TickTick wins).
+  - A new list is never paired with an archived project.
 - **Subtasks:** TickTick checklist items appear in OpenTodo as subtasks, ticked items as completed ones, and TickTick child tasks as OpenTodo subtasks. Titles and ticks sync both ways, as do adding and deleting. A subtask added in OpenTodo becomes a checklist item if the TickTick task is a checklist, otherwise a TickTick child task. Order is copied when an item is created, not afterwards. On a conflict TickTick wins, including whether an item is ticked.
 - **Reminders:** TickTick reminders ↔ OpenTodo relative reminders. For all-day tasks, TickTick counts from midnight and OpenTodo from 09:00, and the sync converts between the two.
-- **Habits:** name, repeat, part of the day (morning/afternoon/evening ↔ TickTick's sections) and reminder times are kept in step. Ticking or un-ticking a day in either app is copied to the other, for the last 30 days. New TickTick habits appear in an OpenTodo project called **Habits**; new OpenTodo habits are created in TickTick as yes/no habits.
+- **Habits:** name, repeat, part of the day (morning/afternoon/evening ↔ TickTick's sections) and reminder times are kept in step. Ticking or un-ticking a day in either app is copied to the other, for the last 30 days. OpenTodo can't record a day before a habit's first day there, so ticking such a day in TickTick stays in TickTick only. New TickTick habits appear in an OpenTodo project called **Habits**; new OpenTodo habits are created in TickTick as yes/no habits. A habit with the same name in both apps is paired rather than copied, and TickTick's version wins.
 
 ## OpenTodo end-to-end encryption
 
@@ -226,6 +236,7 @@ With encryption on, OpenTodo's server only holds ciphertext for task titles and 
 - **Changing the passphrase or resetting the recovery key** elsewhere makes the stored one stop working. Update `.env` and restart.
 - **Values that don't decrypt** keep their task, project or label out of the sync, with a warning. They're never mistaken for an edit or a deletion.
 - **Safety checks:**
+  - With a secret set, OpenTodo must report encryption on. If it says it's off, or stops saying, every pass stops instead of writing plaintext. If you turn encryption off in OpenTodo, remove the secret from `.env`.
   - The TickTick client refuses to write any encrypted value.
   - If a browser tab open on OpenTodo overwrites a just-created task, habit or project with the sync's temporary placeholder, the next pass puts the content back from TickTick.
 
@@ -247,6 +258,7 @@ The service is built to share a small host:
 - **Lockdown:** the root filesystem is read-only, with `cap_drop: ALL`, `no-new-privileges` and no published ports.
 - **Writes:** it only writes to its data volume (SQLite, and only when something changed) and two small tmpfs mounts.
 - **Logs:** Docker logs rotate at 3 × 1 MB.
+- **Memory:** each pass holds OpenTodo's whole task list in memory, completed and trashed tasks and every habit day included, and that list only grows. The summary line shows how many tasks were read and the peak memory against the 128 MB limit, and a warning appears past 80%. If it gets there, raise `mem_limit` (and `memswap_limit`) in `compose.yaml`, or empty OpenTodo's Trash.
 
 **DNS:** Docker can't forward to a `127.0.0.1` resolver. If the host's own `resolv.conf` points at Pi-hole on loopback, containers fall back to public DNS. To resolve through Pi-hole, uncomment `dns:` in [compose.yaml](compose.yaml) and set it to the host's LAN address.
 
@@ -258,14 +270,14 @@ State lives in the Docker volume `ticktick-opentodo-sync-data`, in `/data/tickti
 - a few settings;
 - the last-synced copy of each task (title, notes, dates…), used to tell which side changed.
 
-That last item is task content, decrypted, so treat the volume as private.
+That last item is task content, decrypted, so treat the volume, and any copy of it, as private. `*.sqlite3*` and `*.log` files are gitignored, so a backup or a cron log made in the checkout can't be committed by accident.
 
 ```sh
 docker compose cp ticktick-opentodo-sync:/data/ticktick-opentodo-sync.sqlite3 ./backup.sqlite3   # backup
 docker compose down && docker volume rm ticktick-opentodo-sync-data                              # full reset
 ```
 
-After a reset, every task looks new on both sides. Empty OpenTodo or use `--match-existing` before syncing again.
+After a reset, every task looks new on both sides. Empty OpenTodo or use `--match-existing` before syncing again. Habits are paired again by name on the next pass, and the **Habits** project is recognised again: a project with that name holding habits.
 
 ## Development
 
@@ -284,6 +296,20 @@ docker run --rm -v "$PWD":/w -w /w -e PYTHONPATH=/w/src ticktick-opentodo-sync:d
 
 Outside Docker (Python 3.11 or newer): `pip install -e '.[dev]'` in a virtualenv, then `pytest`, `ruff check src tests` and `mypy`. See [Running without Docker](#running-without-docker) for running the sync itself.
 
+### Updating dependencies
+
+The image installs its runtime dependencies, and the setuptools that builds the package, from `requirements.lock`. That file pins each exact version with the hashes of every file PyPI has for it (arm64 and amd64 alike), so a rebuild on the Pi can't pick up a release that changed or was tampered with. After changing `dependencies` in `pyproject.toml`, or to take new releases, regenerate it with pip-tools in a throwaway container. pip-tools doesn't become a project dependency.
+
+```sh
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/w -w /w python:3.13-slim-trixie sh -c \
+  "pip -q install --target /tmp/pt pip-tools 'setuptools>=77' && PYTHONPATH=/tmp/pt python -m piptools compile \
+   --upgrade --quiet --no-build-isolation --generate-hashes --allow-unsafe --strip-extras \
+   --build-deps-for wheel --output-file requirements.lock pyproject.toml"
+docker build --target test .
+```
+
+Without `--upgrade` it keeps the current pins and only adds what `pyproject.toml` newly asks for. The build's `pip check` fails if the lock is missing a dependency `pyproject.toml` names.
+
 ### Code map
 
 - **Pure sync rules:** `engine.py`. Every row of the rules table has a test in `tests/test_engine.py`. `habits.py` is its counterpart for habits.
@@ -297,10 +323,11 @@ API details and the field-mapping table are in [docs/api-notes.md](docs/api-note
 
 ### Unconfirmed API behaviour
 
-The sync handles these defensively, but TickTick's docs don't confirm them. They're marked **UNVERIFIED** in [docs/api-notes.md](docs/api-notes.md); reports either way are welcome.
+The sync handles these defensively, but TickTick's docs don't confirm them. They're marked **UNVERIFIED** in [docs/api-notes.md](docs/api-notes.md); reports either way are welcome. When either app ignores part of a write, the log says so, for example `WARNING TickTick didn't take the due of 'Report'`. Such a line is exactly the kind of report that helps.
 
 1. Updating a TickTick task with `dueDate: null` clears its due date.
-2. A deleted TickTick task answers 404 (or carries a `deleted` flag).
+2. A deleted TickTick task answers 404 (or an empty answer, or carries a `deleted` flag).
+3. A TickTick list with no open tasks may come back without its `tasks` field.
 
 ## Contributing
 

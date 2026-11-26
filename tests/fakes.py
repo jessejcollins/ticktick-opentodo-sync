@@ -4,14 +4,27 @@ from __future__ import annotations
 
 import copy
 import itertools
+import sqlite3
 from datetime import datetime, timedelta
 from typing import Any
 
 from ticktick_opentodo_sync.http import ApiError
 from ticktick_opentodo_sync.mapping import format_tt_datetime, parse_tt_datetime
 from ticktick_opentodo_sync.models import JSON
+from ticktick_opentodo_sync.state import State
 
 _ids = itertools.count(1)
+
+_WRITES = frozenset({sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE})
+
+
+def deny_writes(state: State) -> None:
+    """Make every state write fail, like a full disk or a failing SD card (``None`` undoes)."""
+
+    def authorizer(action: int, *_: object) -> int:
+        return sqlite3.SQLITE_DENY if action in _WRITES else sqlite3.SQLITE_OK
+
+    state.db.set_authorizer(authorizer)
 
 
 def _id(prefix: str) -> str:
@@ -79,8 +92,15 @@ class FakeTickTick:
         ]
         return {"project": {"id": pid}, "tasks": tasks, "columns": []}
 
-    def get_task(self, project_id: str, task_id: str) -> JSON | None:
+    def _in(self, project_id: str, task_id: str) -> JSON | None:
+        """The task, only when asked for under its own list: whether the real API answers a
+        lookup under another list is UNVERIFIED (docs/api-notes.md), so assume a 404."""
         t = self.tasks.get(task_id)
+        pid = self.inbox_id if project_id == "inbox" else project_id
+        return t if t is not None and t["projectId"] == pid else None
+
+    def get_task(self, project_id: str, task_id: str) -> JSON | None:
+        t = self._in(project_id, task_id)
         return copy.deepcopy(t) if t else None
 
     @staticmethod
@@ -168,7 +188,8 @@ class FakeTickTick:
 
     def delete_task(self, project_id: str, task_id: str) -> None:
         self.writes.append(("delete", task_id))
-        self.tasks.pop(task_id, None)
+        if self._in(project_id, task_id) is not None:  # else a 404, which the client ignores
+            del self.tasks[task_id]
 
     def move_task(self, task_id: str, from_project: str, to_project: str) -> None:
         self.writes.append(("move", task_id))
@@ -234,6 +255,16 @@ class FakeOpenTodo:
     def rename_project(self, project_id: str, name: str) -> JSON:
         self.writes.append(("rename_project", name))
         self.projects_[project_id]["name"] = name
+        return copy.deepcopy(self.projects_[project_id])
+
+    def archive_project(self, project_id: str) -> JSON:
+        self.writes.append(("archive_project", project_id))
+        self.projects_[project_id]["archived"] = True
+        return copy.deepcopy(self.projects_[project_id])
+
+    def restore_project(self, project_id: str) -> JSON:
+        self.writes.append(("restore_project", project_id))
+        self.projects_[project_id]["deleted_at"] = None
         return copy.deepcopy(self.projects_[project_id])
 
     def labels(self) -> list[JSON]:

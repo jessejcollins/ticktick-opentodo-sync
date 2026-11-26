@@ -13,9 +13,13 @@ def test_defaults() -> None:
     cfg = load(REQUIRED)
     assert cfg.dry_run is True
     assert cfg.max_destructive == 10
+    assert cfg.max_deletes_per_day == 50
+    assert cfg.max_creates == 50
     assert cfg.interval == 300
     assert cfg.opentodo_url == "https://ot.example"
     assert cfg.timezone is None
+    assert cfg.log_level == "INFO"
+    assert load(REQUIRED | {"TICKTICK_OPENTODO_SYNC_LOG_LEVEL": " debug "}).log_level == "DEBUG"
 
 
 def test_missing_required() -> None:
@@ -30,12 +34,48 @@ def test_missing_required() -> None:
         ("TICKTICK_OPENTODO_SYNC_TIMEZONE", "Mars/Base"),
         ("TICKTICK_OPENTODO_SYNC_INTERVAL", "10"),
         ("TICKTICK_OPENTODO_SYNC_MAX_DESTRUCTIVE", "x"),
+        ("TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY", "-1"),
+        ("TICKTICK_OPENTODO_SYNC_MAX_CREATES", "x"),
+        ("TICKTICK_OPENTODO_SYNC_ALLOW_HTTP", "maybe"),
+        ("TICKTICK_OPENTODO_SYNC_LOG_LEVEL", "VERBOSE"),  # basicConfig raised: a traceback
         ("OPENTODO_URL", "ot.example"),
+        ("OPENTODO_URL", "ftp://ot.example"),
+        ("OPENTODO_URL", "https://"),
     ],
 )
 def test_invalid_values(key: str, value: str) -> None:
     with pytest.raises(ConfigError):
         load(REQUIRED | {key: value})
+
+
+@pytest.mark.parametrize(
+    "url", ["http://todo.lan", "http://192.168.1.10:8080", "http://user:s3cret@todo.lan"]
+)
+def test_http_is_refused(url: str) -> None:
+    """The full-scope token, and OpenTodo's encryption key record, would travel unencrypted."""
+    with pytest.raises(ConfigError, match="ALLOW_HTTP=true") as err:
+        load(REQUIRED | {"OPENTODO_URL": url})
+    assert "todo.lan" not in str(err.value) and "s3cret" not in str(err.value)  # never echoed
+
+
+@pytest.mark.parametrize("url", ["http://localhost:8080", "http://127.0.0.1", "http://[::1]:3000"])
+def test_http_to_this_machine_is_fine(url: str) -> None:
+    cfg = load(REQUIRED | {"OPENTODO_URL": url})
+    assert cfg.opentodo_url == url and cfg.warnings == ()
+
+
+def test_http_elsewhere_with_the_opt_in() -> None:
+    cfg = load(
+        REQUIRED
+        | {"OPENTODO_URL": "http://opentodo:8080/", "TICKTICK_OPENTODO_SYNC_ALLOW_HTTP": "true"}
+    )
+    assert cfg.opentodo_url == "http://opentodo:8080"
+    assert cfg.warnings == ("OPENTODO_URL uses http://: the token travels unencrypted",)
+
+
+def test_ticktick_base_url_is_checked_too() -> None:
+    with pytest.raises(ConfigError, match="TICKTICK_BASE_URL"):
+        load(REQUIRED | {"TICKTICK_BASE_URL": "http://api.ticktick.com"})
 
 
 def test_env_file_parsing_and_precedence(tmp_path: Path) -> None:
@@ -53,6 +93,25 @@ def test_env_file_parsing_and_precedence(tmp_path: Path) -> None:
     assert cfg.ticktick_token == "from env"
     assert cfg.opentodo_url == "https://file.example"
     assert cfg.dry_run is False
+
+
+def test_env_file_quoted_values(tmp_path: Path) -> None:
+    """KEY='value' # comment kept its quotes: a passphrase that wouldn't unlock."""
+    f = tmp_path / ".env"
+    f.write_text(
+        "A='secret pass' # the passphrase\n"
+        'B="x" #c\n'
+        "C='keeps # inside'\n"
+        "D='it's'\n"
+        "E=plain # comment\n"
+    )
+    assert read_env_file(f) == {
+        "A": "secret pass",
+        "B": "x",
+        "C": "keeps # inside",
+        "D": "it's",
+        "E": "plain",
+    }
 
 
 def test_env_file_bad_line(tmp_path: Path) -> None:

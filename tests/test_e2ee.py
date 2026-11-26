@@ -4,6 +4,7 @@ a full sync against an encrypting server (the 2026-11-21 incident as a regressio
 from __future__ import annotations
 
 import copy
+import dataclasses
 import itertools
 import json
 import re
@@ -17,8 +18,13 @@ import respx
 from fakes import FakeTickTick
 
 from ticktick_opentodo_sync import e2ee
-from ticktick_opentodo_sync.http import Http
-from ticktick_opentodo_sync.opentodo import PLACEHOLDER, EncryptionLockedError, OpenTodo
+from ticktick_opentodo_sync.http import ApiError, Http
+from ticktick_opentodo_sync.opentodo import (
+    PLACEHOLDER,
+    EncryptionExpectedError,
+    EncryptionLockedError,
+    OpenTodo,
+)
 from ticktick_opentodo_sync.state import State
 from ticktick_opentodo_sync.sync import Syncer
 from ticktick_opentodo_sync.ticktick import CiphertextWriteError, TickTick
@@ -109,6 +115,14 @@ def test_unlock_failures() -> None:
         e2ee.unlock_with_passphrase(RECORD, PASSPHRASE)  # 1000 < the real minimum
     with pytest.raises(e2ee.E2EEError, match="typos"):
         e2ee.unlock_with_recovery_key(RECORD, RECOVERY_TEXT[:-1] + "A")
+
+
+def test_recovery_key_ignores_the_passphrase_derivation() -> None:
+    """``kdf`` is how the passphrase is stretched; the recovery key has its own (HKDF)."""
+    record = dataclasses.replace(RECORD, kdf=2)  # a passphrase KDF this client doesn't know
+    with pytest.raises(e2ee.E2EEError, match="unsupported"):
+        e2ee.unlock_with_passphrase(record, PASSPHRASE, min_iterations=1000)
+    assert _roundtrip(e2ee.unlock_with_recovery_key(record, RECOVERY_TEXT)) == "hello"
 
 
 def test_ticktick_refuses_ciphertext_writes() -> None:
@@ -230,6 +244,40 @@ def client(**secrets: str) -> OpenTodo:
     )
 
 
+def _me(router: respx.MockRouter, body: dict[str, Any]) -> None:
+    router.get(f"{OT}/api/v1/me").mock(return_value=httpx.Response(200, json=body))
+
+
+@pytest.mark.parametrize("me", [{"encryption": {"enabled": False}}, {"id": "u1"}])
+def test_secret_set_but_encryption_not_reported_on(me: dict[str, Any]) -> None:
+    """2026-11-25 review: a server saying "off" (or a /me without the field) got every write
+    in plaintext, decrypted with the key from the earlier passes."""
+    with respx.mock(assert_all_called=False) as router:
+        server = EncryptedServer(router)
+        ot = client(recovery_key=RECOVERY_TEXT)
+        ot.begin_pass()
+        task = ot.create_task({"title": "Secret"}, idempotency_key="k")
+        _me(router, me)
+        with pytest.raises(EncryptionExpectedError, match="remove the secret"):
+            ot.begin_pass()
+        ot.update_task(task["id"], {"title": "Secret two"})  # a caller carrying on anyway
+
+        fresh = client(recovery_key=RECOVERY_TEXT)
+        with pytest.raises(EncryptionExpectedError):
+            fresh.begin_pass()
+        with pytest.raises(EncryptionLockedError):
+            fresh.create_task({"title": "Secret three"}, idempotency_key="k3")
+        assert "Secret" not in json.dumps([w[2] for w in server.writes])
+
+
+@pytest.mark.parametrize("enc", [{"enabled": "yes"}, {"keyVersion": 1}, True, []])
+def test_malformed_encryption_field_stops_the_pass(enc: object) -> None:
+    with respx.mock() as router:
+        _me(router, {"encryption": enc})
+        with pytest.raises(TypeError, match="encryption"):
+            client().begin_pass()
+
+
 def test_locked_without_secret(server: EncryptedServer) -> None:
     with pytest.raises(EncryptionLockedError, match="OPENTODO_ENCRYPTION_PASSPHRASE"):
         client().begin_pass()
@@ -262,6 +310,38 @@ def test_half_created_task_is_removed_and_ignored(server: EncryptedServer) -> No
         ot.create_task({"title": "Secret"}, idempotency_key="k")
     (orphan,) = server.data["tasks"].values()
     assert orphan["title"] == PLACEHOLDER and orphan["deleted_at"] == 1
+
+
+def test_failed_cleanup_keeps_the_original_error(caplog: pytest.LogCaptureFixture) -> None:
+    """A transport error while removing a half-created task replaced the PATCH's error."""
+    record = {
+        "version": 1,
+        "kdf": 1,
+        "salt": RECORD.salt,
+        "iterations": RECORD.iterations,
+        "wrappedByPassphrase": RECORD.wrapped_by_passphrase,
+        "wrappedByRecovery": RECORD.wrapped_by_recovery,
+    }
+    with respx.mock() as router:
+        router.get(f"{OT}/api/v1/me").mock(
+            return_value=httpx.Response(
+                200, json={"encryption": {"enabled": True, "keyVersion": 1}}
+            )
+        )
+        router.get(f"{OT}/api/v1/encryption/keys").mock(
+            return_value=httpx.Response(200, json={"keys": record})
+        )
+        router.post(f"{OT}/api/v1/tasks").mock(return_value=httpx.Response(201, json={"id": "t1"}))
+        router.patch(f"{OT}/api/v1/tasks/t1").mock(return_value=httpx.Response(400, json={}))
+        router.delete(f"{OT}/api/v1/tasks/t1").mock(side_effect=httpx.ConnectError("down"))
+        ot = OpenTodo(
+            Http("OpenTodo", OT, "tok", min_interval=0, sleep=lambda _: None),
+            recovery_key=RECOVERY_TEXT,
+        )
+        ot.begin_pass()
+        with pytest.raises(ApiError, match="400"):
+            ot.create_task({"title": "Secret"}, idempotency_key="k")
+    assert "could not remove half-created OpenTodo task t1" in caplog.text
 
 
 def test_unreadable_values_are_marked(server: EncryptedServer) -> None:

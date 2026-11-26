@@ -6,6 +6,7 @@ Runs after the task pass, on the OpenTodo tasks that pass already fetched.
 from __future__ import annotations
 
 import logging
+import sqlite3
 from collections.abc import Callable, Iterable
 from dataclasses import replace
 from datetime import UTC, date, datetime
@@ -29,6 +30,8 @@ from .habits import (
     habit_from_tt,
     habit_to_ot,
     habit_to_tt,
+    match_habits,
+    name_key,
     ot_done_days,
     plan_days,
     plan_habits,
@@ -53,6 +56,10 @@ DAILY_RULES = frozenset(
 HABITS_PROJECT = "Habits"
 META_PROJECT = "ot_habits_project"
 """Meta key: id of the OpenTodo project new habits go to (kept out of the task sync)."""
+
+
+class CheckInRefusedError(Exception):
+    """OpenTodo won't record this habit day (before the habit's first day, or in the future)."""
 
 
 class HabitTickTick(Protocol):
@@ -84,13 +91,15 @@ class HabitSync:
         now_ms: Callable[[], int],
         run_id: str,
         max_destructive: int,
+        noted: set[str] | None = None,
     ) -> None:
         self.tt, self.ot, self.state = tt, ot, state
         self.timezone = timezone
         self.now_ms = now_ms
         self.run_id = run_id
         self.max_destructive = max_destructive
-        self._noted: set[str] = set()
+        self._noted = set() if noted is None else noted
+        """Warnings given already: owned by the caller, since a HabitSync lives one pass."""
 
     def run(
         self,
@@ -142,6 +151,7 @@ class HabitSync:
         ot_due = {
             oid: str((raw.get("due") or {}).get("date") or "") for oid, raw in ot_habits.items()
         }
+        pairs += self._pair_by_name(pairs, tt_defs, ot_defs, dry_run=dry_run)
 
         tt_done = tt_done_days(
             self.tt.habit_checkins(sorted(tt_defs), day_to_stamp(days[0]), day_to_stamp(days[-1]))
@@ -155,7 +165,10 @@ class HabitSync:
             if p.tt_id in tt_defs or p.ot_id in ot_defs
         }
 
-        for a in self._plan(pairs, tt_defs, ot_defs, damaged):
+        habit_actions = self._plan(pairs, tt_defs, ot_defs, damaged)
+        if habit_actions and not dry_run:
+            self.state.check_writable()
+        for a in habit_actions:
             desc = f"{a.kind.value} habit {a.habit.name!r}: {a.note}"
             if dry_run:
                 if a.kind is not HKind.REHASH:
@@ -167,6 +180,8 @@ class HabitSync:
                     pair = self._apply_habit(
                         a, tt_raw, tt_done, days, section_names, section_ids, ot_due, ot_project_ids
                     )
+                except sqlite3.Error:
+                    raise  # the pair can't be recorded: stop the pass (see Syncer._apply)
                 except Exception as exc:
                     res.errors += 1
                     log.error("failed to %s: %s", desc, exc)  # noqa: TRY400
@@ -181,17 +196,30 @@ class HabitSync:
                 ot_defs.setdefault(pair[1], a.habit)
 
         base = st.habit_days(self.state)
-        actions = plan_days(day_pairs, days, tt_done, ot_done, base)
-        clears = sum(a.kind is DKind.CLEAR_TT for a in actions)
+        refused = self._refused(day_pairs, tt_done, ot_done, dry_run=dry_run)
+        actions = plan_days(day_pairs, days, tt_done, ot_done, base, refused=refused)
+        # Both directions count: one empty check-in answer from TickTick reads as every
+        # synced day un-checked there, and would clear them all in OpenTodo.
+        clears_tt = sum(a.kind is DKind.CLEAR_TT for a in actions)
+        clears_ot = sum(a.kind is DKind.CLEAR_OT for a in actions)
+        clears = clears_tt + clears_ot
         if clears > self.max_destructive and not allow_bulk:
-            res.errors += 1
-            log.warning(
-                "habits: %d check-ins would be cleared in TickTick (more than %d); none written. "
-                "Review, then run once with --allow-bulk.",
-                clears,
-                self.max_destructive,
+            # Blocked like the task guards (BLOCKED in the summary, --status and health),
+            # rather than counted as an error.
+            res.blocked = (
+                f"habits: {clears} check-ins would be cleared ({clears_tt} in TickTick, "
+                f"{clears_ot} in OpenTodo), more than "
+                f"TICKTICK_OPENTODO_SYNC_MAX_DESTRUCTIVE={self.max_destructive}; none written. "
+                "Review, then run once with --allow-bulk."
             )
+            log.warning("%s", res.blocked)
+            if not dry_run:
+                self.state.set_meta_json(
+                    "blocked", {"at": self.now_ms(), "count": clears, "reason": res.blocked}
+                )
             return
+        if actions and not dry_run:
+            self.state.check_writable()
         self._apply_days(actions, names, ot_due, res, dry_run=dry_run)
         if not dry_run:
             st.prune_habit_days(self.state, days[0])
@@ -270,6 +298,41 @@ class HabitSync:
 
     # --- definitions ------------------------------------------------------------------
 
+    def _pair_by_name(
+        self,
+        pairs: list[HabitPair],
+        tt_defs: dict[str, HabitDef],
+        ot_defs: dict[str, HabitDef],
+        *,
+        dry_run: bool,
+    ) -> list[HabitPair]:
+        """New pairs of same-named unpaired habits (see :func:`match_habits`).
+
+        TickTick wins: its side reads as changed, so the plan copies its definition over (or
+        just records it when both agree). Unpaired habits whose name is ambiguous are dropped
+        from ``tt_defs``/``ot_defs`` with a warning, so neither side's copy is made.
+        """
+        matches, ambiguous = match_habits(pairs, tt_defs, ot_defs)
+        new = [
+            HabitPair(tt_id, ot_id, "", ot_defs[ot_id].content_hash()) for tt_id, ot_id in matches
+        ]
+        for p in new:
+            log.info("%spair habit %r by name", "would " if dry_run else "", tt_defs[p.tt_id].name)
+            if not dry_run:
+                st.put_habit_pair(self.state, p)
+        paired = {p.tt_id for p in [*pairs, *new]} | {p.ot_id for p in [*pairs, *new]}
+        for side, defs in (("TickTick", tt_defs), ("OpenTodo", ot_defs)):
+            for hid in [
+                h for h, d in defs.items() if h not in paired and name_key(d.name) in ambiguous
+            ]:
+                self._note(
+                    f"ambiguous:{hid}",
+                    f"{side} habit {defs[hid].name!r} not synced: that name is on both sides "
+                    "but not unique on one; rename one of them",
+                )
+                del defs[hid]
+        return new
+
     def _pseudo_pair(self, a: HabitAction) -> tuple[str, str] | None:
         if a.kind is HKind.CREATE_OT and a.tt_id:
             return a.tt_id, f"new:{a.tt_id}"
@@ -347,6 +410,31 @@ class HabitSync:
 
     # --- days -------------------------------------------------------------------------
 
+    def _refused(
+        self,
+        day_pairs: list[tuple[str, str]],
+        tt_done: set[tuple[str, str]],
+        ot_done: set[tuple[str, str]],
+        *,
+        dry_run: bool,
+    ) -> set[tuple[str, str]]:
+        """Refused check-ins that still stand: checked in TickTick, still not in OpenTodo.
+
+        The others (un-checked in TickTick, recorded in OpenTodo after all, or out of the
+        window) are forgotten.
+        """
+        ot_ids = dict(day_pairs)
+        refused = st.habit_refused(self.state)
+        standing = {
+            (tt_id, day)
+            for tt_id, day in refused
+            if (tt_id, day) in tt_done and (ot_ids.get(tt_id, ""), day) not in ot_done
+        }
+        if not dry_run:
+            for tt_id, day in refused - standing:
+                st.set_habit_refused(self.state, tt_id, day, False)
+        return standing
+
     def _apply_days(
         self,
         actions: list[DayAction],
@@ -365,6 +453,18 @@ class HabitSync:
             if not dry_run:
                 try:
                     self._apply_day(a, ot_due)
+                except CheckInRefusedError as exc:
+                    # Not recorded as synced: the gap in OpenTodo would then read as an
+                    # un-check there, and the next pass would clear the day in TickTick.
+                    st.set_habit_refused(self.state, a.tt_id, a.day, True)
+                    log.warning(
+                        "OpenTodo won't take habit %r on %s (%s); it stays checked in TickTick "
+                        "only",
+                        names.get(a.tt_id, a.tt_id),
+                        a.day,
+                        exc,
+                    )
+                    continue
                 except Exception as exc:
                     res.errors += 1
                     log.error(  # noqa: TRY400
@@ -402,8 +502,7 @@ class HabitSync:
             except ApiError as exc:
                 if exc.status != 400:
                     raise
-                log.warning("OpenTodo won't take habit day %s (%s); left as is", a.day, exc)
-                return
+                raise CheckInRefusedError(str(exc)) from exc
             current = (resp.get("habit") or {}).get("current_date")
             if a.day >= due or not due:
                 ot_due[a.ot_id] = str(current or _next_day(a.day))
@@ -424,7 +523,7 @@ class HabitSync:
             )
 
     def _note(self, key: str, message: str) -> None:
-        """Log once per process (the loop runs every few minutes)."""
+        """Log once per process (the loop runs every few minutes): ``noted`` outlives the pass."""
         if key not in self._noted:
             self._noted.add(key)
             log.warning("%s", message)

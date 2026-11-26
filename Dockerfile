@@ -8,9 +8,15 @@ FROM ${PYTHON_IMAGE} AS build
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONDONTWRITEBYTECODE=1
 RUN python -m venv /opt/venv
 WORKDIR /src
+# Runtime dependencies and the build backend exactly as locked: hashes checked, wheels only.
+# The running image holds both tokens and the encryption secret. README: Updating dependencies.
+COPY requirements.lock ./
+RUN /opt/venv/bin/pip install --require-hashes --only-binary=:all: -r requirements.lock
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN /opt/venv/bin/pip install .
+# The package itself, built with the locked setuptools. pip check fails the build when
+# pyproject.toml names a dependency the lock doesn't hold.
+RUN /opt/venv/bin/pip install --no-deps --no-build-isolation . && /opt/venv/bin/pip check
 
 FROM build AS dev
 RUN /opt/venv/bin/pip install '.[dev]'

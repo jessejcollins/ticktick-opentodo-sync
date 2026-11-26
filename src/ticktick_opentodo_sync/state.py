@@ -5,6 +5,7 @@ Every write is its own short transaction, issued only when something changed.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import sqlite3
@@ -18,7 +19,7 @@ from .engine import Pair
 from .habits import HabitDef, HabitPair
 from .models import Task
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 TASKS = "pairs"
 ITEMS = "item_pairs"
@@ -56,6 +57,11 @@ CREATE TABLE IF NOT EXISTS habit_days (
     day   TEXT NOT NULL,
     PRIMARY KEY (tt_id, day)
 );
+CREATE TABLE IF NOT EXISTS habit_refused (
+    tt_id TEXT NOT NULL,
+    day   TEXT NOT NULL,
+    PRIMARY KEY (tt_id, day)
+);
 CREATE TABLE IF NOT EXISTS item_pairs (
     tt_id      TEXT PRIMARY KEY,
     ot_id      TEXT NOT NULL UNIQUE,
@@ -78,6 +84,11 @@ class State:
             self.db.executescript(
                 f"BEGIN;\n{_SCHEMA}\nPRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;"
             )
+        # It holds decrypted task content (the last-synced copies): owner-only, also for a
+        # file created before this was enforced. SQLite gives its journal the same mode.
+        with contextlib.suppress(OSError):  # someone else's file: left as it is
+            if self.path.stat().st_mode & 0o077:
+                self.path.chmod(0o600)
 
     def close(self) -> None:
         self.db.close()
@@ -90,10 +101,27 @@ class State:
         self.db.execute("BEGIN")
         try:
             yield
+            self.db.execute("COMMIT")
         except BaseException:
-            self.db.execute("ROLLBACK")
+            # A failed COMMIT can leave the transaction open (and SQLite may already have
+            # rolled back after a disk error): never leave the loop's connection inside one.
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
             raise
-        self.db.execute("COMMIT")
+
+    def check_writable(self) -> None:
+        """Prove the state can be written right now; raises ``sqlite3.Error`` if not.
+
+        A pass calls this before it writes to either app. A task created in one app whose
+        pair can't be recorded is created again by every later pass, and its copy copied
+        back, so the duplicates double each pass. One small write per pass that writes
+        anyway (a fresh value, so it reaches the disk: an unchanged row isn't rewritten).
+        """
+        self.db.execute(
+            "INSERT INTO meta (key, value) VALUES ('write_check', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(time.time_ns()),),
+        )
 
     # meta ------------------------------------------------------------------------------
 
@@ -269,6 +297,22 @@ def set_habit_day(state: State, tt_id: str, day: str, done: bool) -> None:
         )
     else:
         state.db.execute("DELETE FROM habit_days WHERE tt_id = ? AND day = ?", (tt_id, day))
+
+
+def habit_refused(state: State) -> set[tuple[str, str]]:
+    """(TickTick habit id, day) check-ins OpenTodo refused to record; kept in TickTick only."""
+    return {
+        (r["tt_id"], r["day"]) for r in state.db.execute("SELECT tt_id, day FROM habit_refused")
+    }
+
+
+def set_habit_refused(state: State, tt_id: str, day: str, refused: bool) -> None:
+    if refused:
+        state.db.execute(
+            "INSERT OR IGNORE INTO habit_refused (tt_id, day) VALUES (?, ?)", (tt_id, day)
+        )
+    else:
+        state.db.execute("DELETE FROM habit_refused WHERE tt_id = ? AND day = ?", (tt_id, day))
 
 
 def prune_habit_days(state: State, before: str) -> None:

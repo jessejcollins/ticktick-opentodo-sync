@@ -13,7 +13,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from . import e2ee
-from .http import ApiError, Http
+from .http import Http
 from .models import JSON
 
 log = logging.getLogger(__name__)
@@ -41,6 +41,10 @@ class EncryptionLockedError(Exception):
     """OpenTodo is encrypted and this client has no usable key."""
 
 
+class EncryptionExpectedError(Exception):
+    """A passphrase or recovery key is set, but OpenTodo doesn't report encryption on."""
+
+
 class OpenTodo:
     def __init__(
         self,
@@ -55,6 +59,8 @@ class OpenTodo:
         self.http = http
         self._passphrase = passphrase
         self._recovery_key = recovery_key
+        self._expects_encryption = bool(passphrase or recovery_key)
+        """A secret is set: content is never written in plaintext, whatever the server says."""
         self._unlock_passphrase = unlock_passphrase
         self._key: e2ee.AccountKey | None = None
         self._key_version: int | None = None
@@ -65,19 +71,36 @@ class OpenTodo:
     # --- encryption ---------------------------------------------------------------------
 
     def begin_pass(self) -> None:
-        """Check the account's encryption and unlock (or re-unlock) the key if needed."""
+        """Check the account's encryption and unlock (or re-unlock) the key if needed.
+
+        With a passphrase or recovery key set, encryption is expected: unless OpenTodo reports
+        it on, the pass stops. Otherwise a server answering "off" (or a ``/me`` that changed
+        shape) would get every write in plaintext, decrypted with the key from earlier passes.
+        """
         me = self.http.request("GET", "/api/v1/me")
         if not isinstance(me, dict):
             # Never read "encryption off" from a response we don't understand.
             raise TypeError(f"unexpected GET /api/v1/me response: {type(me).__name__}")
         enc = me.get("encryption")
-        enc = enc if isinstance(enc, dict) else {}
-        self.encrypted = bool(enc.get("enabled"))
-        if not self.encrypted:
+        version: object = None
+        if enc is None:
+            enabled = False  # a server without end-to-end encryption
+        elif isinstance(enc, dict) and isinstance(enc.get("enabled"), bool):
+            enabled, version = enc["enabled"], enc.get("keyVersion")
+        else:
+            raise TypeError(f"unexpected GET /api/v1/me encryption: {enc!r}")
+        if not enabled and self._expects_encryption:
+            raise EncryptionExpectedError(
+                "OPENTODO_ENCRYPTION_PASSPHRASE or OPENTODO_ENCRYPTION_RECOVERY_KEY is set, but "
+                "OpenTodo doesn't report end-to-end encryption on, so nothing is written. If "
+                "you turned encryption off, remove the secret from .env"
+            )
+        self.encrypted = enabled
+        if not enabled:
             return
-        version = enc.get("keyVersion")
         if self._key is not None and self._key_version == version:
             return
+        self._key = None  # stale (or never unlocked): unusable until the unlock below succeeds
         if not (self._passphrase or self._recovery_key):
             raise EncryptionLockedError(
                 "OpenTodo has end-to-end encryption on: set OPENTODO_ENCRYPTION_PASSPHRASE "
@@ -110,15 +133,25 @@ class OpenTodo:
                 obj[UNREADABLE] = True
         return obj
 
+    def _sealing_key(self) -> e2ee.AccountKey | None:
+        """The key writes are encrypted with; None only for an account without encryption.
+
+        Never None while a secret is set, even if :meth:`begin_pass` failed or wasn't called.
+        """
+        if self.encrypted and self._key is not None:
+            return self._key
+        if self.encrypted or self._expects_encryption:
+            raise EncryptionLockedError("OpenTodo encryption is not unlocked; nothing is written")
+        return None
+
     def _seal(self, entity: str, obj_id: str, body: JSON, fields: tuple[str, ...]) -> JSON:
-        if not self.encrypted:
+        key = self._sealing_key()
+        if key is None:
             return body
-        if self._key is None:
-            raise EncryptionLockedError("OpenTodo is encrypted but not unlocked")
         out = dict(body)
         for f in fields:
             if isinstance(out.get(f), str):
-                out[f] = self._key.seal(entity, obj_id, f, out[f])
+                out[f] = key.seal(entity, obj_id, f, out[f])
         return out
 
     def _create_sealed(
@@ -131,7 +164,7 @@ class OpenTodo:
     ) -> JSON:
         """Create with placeholder content, then PATCH the content sealed for the new id."""
         path = f"/api/v1/{collection}"
-        if not self.encrypted:
+        if self._sealing_key() is None:
             return self._open(
                 entity, _obj(self.http.request("POST", path, json=body, headers=headers)), fields
             )
@@ -152,7 +185,7 @@ class OpenTodo:
         except Exception:
             try:
                 self.http.request("DELETE", f"{path}/{new_id}", not_found_ok=True)
-            except ApiError as exc:
+            except Exception as exc:  # logged; the PATCH's error is the one to raise
                 log.error(  # noqa: TRY400
                     "could not remove half-created OpenTodo %s %s (title %r): %s",
                     entity,
@@ -170,11 +203,25 @@ class OpenTodo:
         return [self._open("project", p, NAME_CONTENT) for p in items]
 
     def create_project(self, name: str) -> JSON:
-        return self._create_sealed("project", "projects", {"name": name}, NAME_CONTENT)
+        return self._create_sealed(
+            "project", "projects", {"name": name}, NAME_CONTENT, _idempotency_key()
+        )
 
     def rename_project(self, project_id: str, name: str) -> JSON:
         sealed = self._seal("project", project_id, {"name": name}, NAME_CONTENT)
         resp = self.http.request("PATCH", f"/api/v1/projects/{project_id}", json=sealed)
+        return self._open("project", _obj(resp), NAME_CONTENT)
+
+    def archive_project(self, project_id: str) -> JSON:
+        """Archive a project (with its sub-projects). ``archived`` must be sent on its own."""
+        resp = self.http.request("PATCH", f"/api/v1/projects/{project_id}", json={"archived": True})
+        return self._open("project", _obj(resp), NAME_CONTENT)
+
+    def restore_project(self, project_id: str) -> JSON:
+        """Bring a project back from the Trash; its tasks, only hidden, come back with it."""
+        resp = self.http.request(
+            "PATCH", f"/api/v1/projects/{project_id}", json={"deleted_at": None}
+        )
         return self._open("project", _obj(resp), NAME_CONTENT)
 
     def labels(self) -> list[JSON]:
@@ -182,7 +229,9 @@ class OpenTodo:
         return [self._open("label", x, NAME_CONTENT) for x in items]
 
     def create_label(self, name: str) -> JSON:
-        return self._create_sealed("label", "labels", {"name": name}, NAME_CONTENT)
+        return self._create_sealed(
+            "label", "labels", {"name": name}, NAME_CONTENT, _idempotency_key()
+        )
 
     def tasks(self) -> list[JSON]:
         """Open, completed and soft-deleted (``deleted_at`` set) tasks, with :data:`REMINDERS`."""
@@ -247,7 +296,7 @@ class OpenTodo:
                 "POST",
                 "/api/v1/reminders",
                 json={"task_id": task_id, "kind": "relative", "offset_minutes": minutes},
-                headers={"Idempotency-Key": f"ticktick-opentodo-sync-{uuid.uuid4()}"},
+                headers=_idempotency_key(),
             )
             current.append(_obj(created) | {"offset_minutes": minutes})
 
@@ -275,6 +324,11 @@ class OpenTodo:
         self.http.request("DELETE", f"/api/v1/tasks/{task_id}", not_found_ok=True)
 
 
+def _idempotency_key() -> dict[str, str]:
+    """A fresh key for one create: OpenTodo dedupes that call's retries (see Http.request)."""
+    return {"Idempotency-Key": f"ticktick-opentodo-sync-{uuid.uuid4()}"}
+
+
 def _split_reminders(body: JSON) -> tuple[JSON, list[int] | None]:
     if REMINDERS not in body:
         return body, None
@@ -284,11 +338,26 @@ def _split_reminders(body: JSON) -> tuple[JSON, list[int] | None]:
 
 
 def _items(data: Any, key: str) -> list[JSON]:
-    """The ``key`` list of a response; anything else raises (never read as "none")."""
+    """The ``key`` list of a response; anything else raises (never read as "none").
+
+    So does a listing that says it is one page of several: no paging is documented, and an
+    absent task reads as deleted (an absent reminder as removed, with no bulk guard).
+    """
     items = data.get(key) if isinstance(data, dict) else None
     if not isinstance(items, list):
         raise TypeError(f"unexpected OpenTodo response: no {key!r} list")
+    if _more_pages(data, len(items)):
+        raise TypeError(f"OpenTodo sent one page of {key}; this sync can't page them yet")
     return [x for x in items if isinstance(x, dict)]
+
+
+def _more_pages(data: JSON, n: int) -> bool:
+    if data.get("has_more") or data.get("hasMore"):
+        return True
+    if any(data.get(k) for k in ("next", "next_cursor", "nextCursor", "next_page")):
+        return True
+    total = data.get("total")
+    return isinstance(total, int) and total > n
 
 
 def _obj(data: Any) -> JSON:

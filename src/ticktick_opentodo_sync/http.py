@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import email.utils
 import logging
+import math
 import time
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -14,6 +17,10 @@ from . import __version__
 log = logging.getLogger(__name__)
 
 RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "DELETE", "PATCH"})
+"""Safe to repeat (the sync's PATCHes all set absolute values)."""
+NOT_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+"""Transport errors raised before the request left: any request can be retried."""
 
 
 class ApiError(Exception):
@@ -69,14 +76,35 @@ class Http:
         params: Mapping[str, str] | None = None,
         headers: Mapping[str, str] | None = None,
         not_found_ok: bool = False,
+        idempotent: bool | None = None,
     ) -> Any:
-        """Return the decoded JSON body (``None`` if empty, or on 404 with ``not_found_ok``)."""
+        """Return the decoded JSON body (``None`` if empty, or on 404 with ``not_found_ok``).
+
+        ``idempotent``: safe to send twice. By default true for GET, PUT, PATCH and DELETE,
+        and for a POST with an ``Idempotency-Key`` (the server dedupes it). Anything else is
+        retried only when the answer says it wasn't acted on: repeating a create whose answer
+        was lost makes a duplicate, and repeating a TickTick completion moves a repeating
+        task on twice.
+        """
+        if idempotent is None:
+            idempotent = method.upper() in IDEMPOTENT_METHODS or "Idempotency-Key" in (
+                headers or {}
+            )
         attempt = 0
         while True:
             self._throttle()
             try:
                 resp = self.client.request(method, path, json=json, params=params, headers=headers)
             except httpx.TransportError as exc:
+                if not idempotent and not isinstance(exc, NOT_SENT):
+                    log.warning(
+                        "%s %s %s: no answer (%s); not repeated, as it may have gone through",
+                        self.service,
+                        method,
+                        path,
+                        exc,
+                    )
+                    raise
                 if attempt >= self.retries:
                     raise
                 delay = 2.0**attempt
@@ -94,7 +122,16 @@ class Http:
                     raise ApiError(
                         self.service, method, path, resp.status_code, f"redirect to {where!r}"
                     )
-                if resp.status_code not in RETRY_STATUSES or attempt >= self.retries:
+                retryable = _retryable(resp, idempotent)
+                if not retryable and resp.status_code in RETRY_STATUSES:
+                    log.warning(
+                        "%s %s %s -> %d; not repeated, as it may have gone through",
+                        self.service,
+                        method,
+                        path,
+                        resp.status_code,
+                    )
+                if not retryable or attempt >= self.retries:
                     raise ApiError(self.service, method, path, resp.status_code, resp.text)
                 delay = _retry_after(resp) or 2.0**attempt
                 log.warning(
@@ -109,9 +146,35 @@ class Http:
             self._sleep(min(delay, 60.0))
 
 
+def _retryable(resp: httpx.Response, idempotent: bool) -> bool:
+    if resp.status_code not in RETRY_STATUSES:
+        return False
+    # A 500, 502 or 504 can come after the server acted (a gateway timing out on a slow
+    # backend); a 429, or a 503 asking to come back later, says it wasn't acted on.
+    return (
+        idempotent
+        or resp.status_code == 429
+        or (resp.status_code == 503 and "Retry-After" in resp.headers)
+    )
+
+
 def _retry_after(resp: httpx.Response) -> float | None:
-    value = resp.headers.get("Retry-After")
-    try:
-        return float(value) if value else None
-    except ValueError:
+    """Seconds the server asks to wait (a number or an HTTP date), or None when unusable.
+
+    Only a finite, positive wait: ``time.sleep`` raised on a negative or NaN one, failing
+    the pass, and anything else falls back to the backoff.
+    """
+    value = (resp.headers.get("Retry-After") or "").strip()
+    if not value:
         return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = email.utils.parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        seconds = (when - datetime.now(UTC)).total_seconds()
+    return seconds if math.isfinite(seconds) and seconds > 0 else None

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
+from fakes import deny_writes
 
 from ticktick_opentodo_sync.engine import Pair
 from ticktick_opentodo_sync.models import Task
@@ -53,6 +55,45 @@ def test_no_write_when_meta_unchanged(tmp_path: Path) -> None:
     s.set_meta("k", "v")
     s.set_meta("missing", None)
     assert s.db.total_changes == before
+
+
+def test_check_writable(tmp_path: Path) -> None:
+    s = State(tmp_path / "s.db")
+    before = s.db.total_changes
+    s.check_writable()
+    s.check_writable()
+    assert s.db.total_changes == before + 2  # a real write each time
+    deny_writes(s)
+    with pytest.raises(sqlite3.DatabaseError):
+        s.check_writable()
+
+
+def test_failed_commit_rolls_back(tmp_path: Path) -> None:
+    """A failed COMMIT must not leave the loop's connection inside the transaction."""
+    s = State(tmp_path / "s.db")
+
+    def no_commit(action: int, arg1: str | None, *_: object) -> int:
+        deny = action == sqlite3.SQLITE_TRANSACTION and arg1 == "COMMIT"
+        return sqlite3.SQLITE_DENY if deny else sqlite3.SQLITE_OK
+
+    s.db.set_authorizer(no_commit)
+    with pytest.raises(sqlite3.DatabaseError):
+        s.put_pair(Pair("t", "o", "a", "b", "p"))
+    assert not s.db.in_transaction
+    s.db.set_authorizer(None)
+    assert s.pair_count() == 0
+
+
+def test_state_file_is_owner_only(tmp_path: Path) -> None:
+    """It holds decrypted task content; outside Docker it was made with the default umask."""
+    new = tmp_path / "new.db"
+    State(new).close()
+    assert new.stat().st_mode & 0o777 == 0o600
+    older = tmp_path / "older.db"
+    State(older).close()
+    older.chmod(0o644)  # as made before this was enforced
+    State(older).close()
+    assert older.stat().st_mode & 0o777 == 0o600
 
 
 def test_file_lock_excludes(tmp_path: Path) -> None:

@@ -24,11 +24,11 @@ Base: `https://api.ticktick.com`
 | Purpose | Method + path | Notes |
 |---|---|---|
 | User preferences | `POST /open/v1/preference` | `{"timeZone": "America/Los_Angeles"}`; used as the default zone |
-| List projects | `GET /open/v1/project` | optional `offset`/`limit` (default 200). Project: `id,name,color,sortOrder,closed,groupId,viewMode,permission,kind` (`TASK`/`NOTE`) |
-| Project + tasks | `GET /open/v1/project/{projectId}/data` | `{project, tasks, columns}`. **`tasks` = undone tasks only** (ProjectData definition) |
+| List projects | `GET /open/v1/project` | optional `offset` ("zero-based result offset") and `limit` (default 200 when either is given; no maximum stated). A bare array, with nothing to say more exist, and what a call without either parameter returns is undocumented (checked 2026-11-25). The sync pages with `limit=200` until a short page, and fails if a full page brings no new list (offset ignored): a missing list reads as deleted. Project: `id,name,color,sortOrder,closed,groupId,viewMode,permission,kind` (`TASK`/`NOTE`) |
+| Project + tasks | `GET /open/v1/project/{projectId}/data` | `{project, tasks, columns}`. **`tasks` = undone tasks only** (ProjectData definition). An answer that isn't that shape (empty, `[]`, `{}`, an error object) raises rather than reading as "no tasks", which made every paired task in the list look deleted. A missing `tasks` next to `project` or `columns` is read as an empty list (**UNVERIFIED** whether TickTick omits it) |
 | Get task | `GET /open/v1/project/{projectId}/task/{taskId}` | 200 Task / 404 |
 | Create task | `POST /open/v1/task` | `title`, `projectId` required; returns Task |
-| Update task | `POST /open/v1/task/{taskId}` | body must include `id`, `projectId`. **UNVERIFIED** whether omitted fields are cleared, so ticktick-opentodo-sync sends the full merged task |
+| Update task | `POST /open/v1/task/{taskId}` | body must include `id`, `projectId`. **UNVERIFIED** whether omitted fields are cleared, so ticktick-opentodo-sync sends the full merged task. It reads the task again right before writing and merges over that copy. If the synced fields or the checklist changed since the pass read the task, the write waits for the next pass, because it would undo the change (2026-11-25) |
 | Complete task | `POST /open/v1/project/{projectId}/task/{taskId}/complete` | no body, no content |
 | Delete task | `DELETE /open/v1/project/{projectId}/task/{taskId}` | |
 | Move task | `POST /open/v1/task/move` | body: array of `{fromProjectId,toProjectId,taskId}`; returns `[{id, etag}]` |
@@ -59,15 +59,17 @@ Base: `https://api.ticktick.com`
 
 - Project data returns only undone tasks. When a paired, previously open task disappears, ticktick-opentodo-sync calls `GET .../task/{id}`:
   - `404` → deleted.
+  - An empty `200` (no body, or `{}`) → deleted (**UNVERIFIED** whether TickTick answers that way; kept so a deletion isn't missed). Any other answer that isn't the task (a list, an error object, another id) raises.
   - Task with `deleted` truthy → deleted (**UNVERIFIED** field, handled in case trashed tasks are still returned).
   - `status` `2` or `-1` → completed.
   - `status` `0` → still open but out of scope (moved to a closed list or turned into a subtask). Left alone.
-- If a task's last known state was completed, it is not refetched; it is assumed unchanged until it shows up open again.
-- Caveat: a task moved to a list ticktick-opentodo-sync doesn't pull, then looked up under its old project ID, may 404 and be treated as deleted. The bulk-delete guard limits the blast radius.
+- If a task's last known state was completed, it is not refetched; it is assumed unchanged until it shows up open again. The exception is when its OpenTodo copy changed: that change will be written back, so the task is fetched first, and if it's gone it counts as deleted in TickTick (2026-11-25; before, the write failed on every pass).
+- Each pair stores the list its task was last seen in, refreshed on every pass that sees the task (2026-11-25). Before, only the sync's own moves updated it, so a task moved in the TickTick app and later completed was looked up under its old list. **UNVERIFIED** whether `GET`/`DELETE …/project/{another list}/task/{id}` answers 404; the sync assumes it may, and the test fakes do.
+- Caveat: a task moved to a list ticktick-opentodo-sync doesn't pull (or moved and completed between two passes) is still looked up under its previous list, may 404 and be treated as deleted. The bulk-delete guard limits the blast radius.
 
 ### Rate limits
 
-Not documented. ticktick-opentodo-sync spaces requests (`TICKTICK_OPENTODO_SYNC_HTTP_MIN_INTERVAL`, default 0.3 s) and retries 429/5xx with backoff, honouring `Retry-After`. One pass is about `3 + number of lists` requests plus one GET per task that disappeared.
+Not documented. ticktick-opentodo-sync spaces requests (`TICKTICK_OPENTODO_SYNC_HTTP_MIN_INTERVAL`, default 0.3 s). It retries connection errors, timeouts, 429 and 5xx with backoff, honouring `Retry-After`, but only for requests that are safe to repeat: reads (including TickTick's POST reads), updates, deletes and check-ins. A create or a completion is repeated only when the answer says it wasn't acted on (a connection error, 429, 503 with `Retry-After`). Repeating a TickTick task create whose answer was lost makes a duplicate, and repeating `…/complete` moves a repeating task on twice. One pass is about `3 + number of lists` requests plus one GET per task that disappeared.
 
 ### Recurrence
 
@@ -97,13 +99,13 @@ Completing a repeating task through the API (`.../complete`) moves it to its nex
 
 | Purpose | Method + path | Notes |
 |---|---|---|
-| List tasks | `GET /api/v1/tasks` | `{tasks:[...]}`: open **and** completed. `?include_deleted=true` adds tombstones (`deleted_at` set). `?project_id=` filters. `completed_after/before` select only completed tasks. No pagination documented |
+| List tasks | `GET /api/v1/tasks` | `{tasks:[...]}`: open **and** completed. `?include_deleted=true` adds tombstones (`deleted_at` set). `?project_id=` filters. `completed_after/before` select only completed tasks. No pagination documented. A listing that says it's one page of several (`has_more`, a `next` link or cursor, a `total` above its count) is refused, for every OpenTodo listing: absent tasks would read as deleted |
 | Get task | `GET /api/v1/tasks/{id}` | |
 | Create task | `POST /api/v1/tasks` | 201 returns task |
 | Update task | `PATCH /api/v1/tasks/{id}` | partial; returns task |
 | Complete / reopen | `PATCH` with `completed_at` | ms timestamp completes; `null` reopens. No dedicated route except for recurring occurrences |
 | Delete task | `DELETE /api/v1/tasks/{id}` | soft delete to Trash (204); `DELETE .../purge` is permanent |
-| Projects | `GET/POST /api/v1/projects`, `GET/PATCH/DELETE /api/v1/projects/{id}` | create: `name, color, parent_id, icon, flow_mode` |
+| Projects | `GET/POST /api/v1/projects`, `GET/PATCH/DELETE /api/v1/projects/{id}` | create: `name, color, parent_id, icon, flow_mode`. Archive: `PATCH {"archived": true}`, sent on its own (other fields with it: 400). `DELETE` is a tombstone (Trash): it leaves the project's tasks alone (`project_id` kept, apps hide them); restore with `PATCH {"deleted_at": null}`. **UNVERIFIED** whether `GET` lists trashed projects (with `deleted_at`); the sync restores them when listed (docs checked 2026-11-25) |
 | Labels | `GET/POST /api/v1/labels`, `.../{id}` | create `{name, color?}`; an existing label with the same name returns 200 |
 | History | `GET /api/v1/tasks/{id}/history` | change sets from the op log |
 | Webhooks | `/api/v1/webhooks` | `task.created/updated/completed/reopened/deleted`, HMAC-signed. Not used: the sync usually runs where the OpenTodo server can't reach it |
@@ -144,7 +146,7 @@ A habit is a repeating task with `habit: true`; each day is an occurrence record
 
 ### Project object
 
-`id, name, color, icon, description, parent_id, position, archived, status, flow_mode, workspace_id, created_at, deleted_at`. There is **no Inbox project object**: the Inbox is `project_id: null`.
+`id, name, color, icon, description, parent_id, position, archived, status, flow_mode, workspace_id, created_at, deleted_at`. `archived` is a boolean; `status` is `active` or `maintenance`, not archive state. There is **no Inbox project object**: the Inbox is `project_id: null`.
 
 ## Field mapping (v1)
 

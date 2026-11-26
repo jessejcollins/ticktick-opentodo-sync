@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import difflib
+import ipaddress
+import logging
 import os
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .ticktick import BASE_URL as TICKTICK_BASE_URL
@@ -23,6 +27,8 @@ KNOWN_SETTINGS = frozenset(
     for name in (
         "DRY_RUN",
         "MAX_DESTRUCTIVE",
+        "MAX_DELETES_PER_DAY",
+        "MAX_CREATES",
         "INTERVAL",
         "TIMEZONE",
         "LOG_LEVEL",
@@ -30,6 +36,7 @@ KNOWN_SETTINGS = frozenset(
         "HTTP_TIMEOUT",
         "STATE_DIR",
         "RUN_DIR",
+        "ALLOW_HTTP",
     )
 )
 
@@ -61,6 +68,8 @@ class Config:
     run_dir: Path | None = None
     dry_run: bool = True
     max_destructive: int = 10
+    max_deletes_per_day: int = 50
+    max_creates: int = 50
     timezone: str | None = None
     interval: int = 300
     http_min_interval: float = 0.3
@@ -97,7 +106,10 @@ def read_env_file(path: Path) -> dict[str, str]:
         if not sep or not key.strip().isidentifier():
             raise ConfigError(f"{path}:{lineno}: expected KEY=VALUE")
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        quote = value[:1]
+        if quote in ("'", '"') and (m := re.fullmatch(rf"{quote}(.*?){quote}\s+#.*", value)):
+            value = m.group(1)  # KEY='value' # comment (the quotes used to stay in the value)
+        elif len(value) >= 2 and quote in ("'", '"') and value[-1] == quote:
             value = value[1:-1]
         elif " #" in value:
             value = value.split(" #", 1)[0].rstrip()
@@ -158,16 +170,19 @@ def load(env: Mapping[str, str] | None = None, env_file: Path | None = None) -> 
                 f"TICKTICK_OPENTODO_SYNC_TIMEZONE: unknown time zone {tz!r}"
             ) from None
 
-    url = str(get("OPENTODO_URL"))
-    if not url.startswith(("https://", "http://")):
-        raise ConfigError("OPENTODO_URL must start with https://")
+    warnings = unknown_settings(merged)
+    allow_http = _bool(PREFIX + "ALLOW_HTTP", get(PREFIX + "ALLOW_HTTP", "false") or "false")
+    opentodo_url = _base_url("OPENTODO_URL", str(get("OPENTODO_URL")), allow_http, warnings)
+    ticktick_url = _base_url(
+        "TICKTICK_BASE_URL", str(get("TICKTICK_BASE_URL", TICKTICK_BASE_URL)), allow_http, warnings
+    )
 
     run_dir = get("TICKTICK_OPENTODO_SYNC_RUN_DIR")
     return Config(
         ticktick_token=str(get("TICKTICK_TOKEN")),
-        opentodo_url=url.rstrip("/"),
+        opentodo_url=opentodo_url,
         opentodo_token=str(get("OPENTODO_TOKEN")),
-        ticktick_base_url=str(get("TICKTICK_BASE_URL", TICKTICK_BASE_URL)),
+        ticktick_base_url=ticktick_url,
         state_dir=Path(
             str(get("TICKTICK_OPENTODO_SYNC_STATE_DIR", get("STATE_DIRECTORY", "state")))
         ),
@@ -179,6 +194,16 @@ def load(env: Mapping[str, str] | None = None, env_file: Path | None = None) -> 
         max_destructive=_int(
             "TICKTICK_OPENTODO_SYNC_MAX_DESTRUCTIVE",
             str(get("TICKTICK_OPENTODO_SYNC_MAX_DESTRUCTIVE", "10")),
+            0,
+        ),
+        max_deletes_per_day=_int(
+            "TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY",
+            str(get("TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY", "50")),
+            0,
+        ),
+        max_creates=_int(
+            "TICKTICK_OPENTODO_SYNC_MAX_CREATES",
+            str(get("TICKTICK_OPENTODO_SYNC_MAX_CREATES", "50")),
             0,
         ),
         timezone=tz,
@@ -197,9 +222,50 @@ def load(env: Mapping[str, str] | None = None, env_file: Path | None = None) -> 
             str(get("TICKTICK_OPENTODO_SYNC_HTTP_TIMEOUT", "20")),
             1.0,
         ),
-        log_level=str(get("TICKTICK_OPENTODO_SYNC_LOG_LEVEL", "INFO")).upper(),
+        log_level=_log_level(str(get("TICKTICK_OPENTODO_SYNC_LOG_LEVEL", "INFO"))),
         # Not stripped: whitespace may be part of a passphrase.
         opentodo_passphrase=merged.get("OPENTODO_ENCRYPTION_PASSPHRASE") or None,
         opentodo_recovery_key=get("OPENTODO_ENCRYPTION_RECOVERY_KEY"),
-        warnings=tuple(unknown_settings(merged)),
+        warnings=tuple(warnings),
     )
+
+
+def _log_level(value: str) -> str:
+    """Checked here: logging.basicConfig raised on an unknown one, a traceback at startup."""
+    level = value.strip().upper()
+    if level not in logging.getLevelNamesMapping():
+        raise ConfigError(
+            f"TICKTICK_OPENTODO_SYNC_LOG_LEVEL: expected DEBUG, INFO, WARNING or ERROR, "
+            f"got {value!r}"
+        )
+    return level
+
+
+def _base_url(name: str, url: str, allow_http: bool, warnings: list[str]) -> str:
+    """A service's base URL: https://, or http:// to this machine or when explicitly allowed.
+
+    Over plain http the bearer token travels unencrypted, and for OpenTodo so does the
+    encryption key record (salt, iterations, wrapped key: enough to guess the passphrase
+    offline). The URL is never echoed: it could carry credentials.
+    """
+    parts = urlsplit(url)
+    if parts.scheme not in ("https", "http") or not parts.hostname:
+        raise ConfigError(f"{name} must be a URL like https://todo.example.com")
+    if parts.scheme == "http" and not _loopback(parts.hostname):
+        if not allow_http:
+            raise ConfigError(
+                f"{name} uses http://, which sends the token (and OpenTodo's encryption key "
+                f"record) unencrypted. Use https://, or set {PREFIX}ALLOW_HTTP=true for a "
+                "server on a network you trust"
+            )
+        warnings.append(f"{name} uses http://: the token travels unencrypted")
+    return url.rstrip("/")
+
+
+def _loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False

@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
-from fakes import FakeOpenTodo, FakeTickTick
+from fakes import FakeOpenTodo, FakeTickTick, deny_writes
 
 from ticktick_opentodo_sync.opentodo import PLACEHOLDER
 from ticktick_opentodo_sync.state import State
-from ticktick_opentodo_sync.sync import PassResult, Syncer
+from ticktick_opentodo_sync.sync import PassResult, Syncer, deletes_in_last_day
 
 NY = "America/New_York"
 
@@ -79,6 +80,15 @@ def test_seed_creates_everything_in_opentodo(env: Env) -> None:
     env.assert_quiet()
 
 
+def test_summary_counts_the_opentodo_tasks_read(env: Env) -> None:
+    """All of them are held in memory every pass, and the count only grows."""
+    seed(env)
+    env.ot.delete_task(env.ot_by_title("Inbox thing")["id"])  # trashed: still sent
+    res = env.run()
+    assert res.ot_tasks_read == len(env.ot.tasks_) == 2
+    assert "OpenTodo tasks read=2" in res.summary()
+
+
 def test_placeholder_project_name_is_repaired(env: Env) -> None:
     """A browser saved the create placeholder over a paired project's name."""
     seed(env)
@@ -118,6 +128,80 @@ def test_new_opentodo_project_is_created_in_ticktick(env: Env) -> None:
     env.run()
     garden = next(p for p in env.tt.projects_.values() if p["name"] == "Garden")
     assert any(t["projectId"] == garden["id"] for t in env.tt.tasks.values())
+    env.assert_quiet()
+
+
+def _delete_list(env: Env, n_tasks: int) -> str:
+    """A synced TickTick list "Work" with ``n_tasks`` tasks, then deleted (with its tasks)."""
+    work = env.tt.add_project("Work")
+    tids = [env.tt.add_task(f"task {i}", work) for i in range(n_tasks)]
+    env.run()
+    del env.tt.projects_[work]
+    for tid in tids:
+        del env.tt.tasks[tid]
+    return next(iter(env.ot.projects_))
+
+
+def test_list_deleted_in_ticktick_archives_its_project(env: Env) -> None:
+    """It used to come back: the OpenTodo project, now unpaired, was created as a new list."""
+    otp = _delete_list(env, 2)
+    env.ot.add_task("Draft", otp)  # added in OpenTodo since the last pass
+    res = env.run()
+    assert res.ok and res.ot.deleted == 2 and not res.tt.created, res.summary()
+    assert env.ot.projects_[otp]["archived"] is True
+    assert env.state.project_pairs() == {}
+    assert not env.tt.projects_  # not recreated
+    assert env.ot_by_title("Draft")["deleted_at"] is None  # left in the archived project
+    env.assert_quiet()
+
+
+def test_blocked_pass_writes_no_list_or_project_either(env: Env) -> None:
+    """Lists and projects were created while collecting, before the guards ran."""
+    otp = _delete_list(env, 12)
+    writes = (len(env.tt.writes), len(env.ot.writes))
+    res = env.run()
+    assert res.blocked
+    assert (len(env.tt.writes), len(env.ot.writes)) == writes
+    res = env.run(allow_bulk=True)
+    assert res.ok and res.ot.deleted == 12, res.summary()
+    assert env.ot.projects_[otp]["archived"] is True and not env.tt.projects_
+    env.assert_quiet()
+
+
+def test_project_deleted_in_opentodo_is_restored(env: Env) -> None:
+    """Deleting a project in OpenTodo only hides its tasks: TickTick wins, it comes back."""
+    seed(env)
+    otp = next(iter(env.ot.projects_))
+    env.ot.projects_[otp]["deleted_at"] = 1
+    res = env.run()
+    assert res.ok and not res.tt.deleted and not res.ot.created, res.summary()
+    assert env.ot.projects_[otp]["deleted_at"] is None
+    assert env.ot_by_title("Report")["project_id"] == otp
+    env.assert_quiet()
+
+
+def test_project_purged_in_opentodo_is_recreated(env: Env) -> None:
+    """Purging also purges its tasks: deleted in TickTick (bulk-guarded), the list stays."""
+    seed(env)
+    otp = next(iter(env.ot.projects_))
+    del env.ot.projects_[otp]
+    env.ot.tasks_ = {k: t for k, t in env.ot.tasks_.items() if t["project_id"] != otp}
+    res = env.run()
+    assert res.ok and res.tt.deleted == 1, res.summary()
+    assert [p["name"] for p in env.ot.projects_.values()] == ["Work"]
+    assert [p["name"] for p in env.tt.projects_.values()] == ["Work"]
+    env.assert_quiet()
+
+
+def test_new_list_never_pairs_with_an_archived_project(env: Env) -> None:
+    """Its tasks would never sync: an archived project is out of scope."""
+    old = env.ot.add_project("Groceries", archived=True)
+    env.tt.add_task("milk", env.tt.add_project("Groceries"))
+    env.run()
+    milk = env.ot_by_title("milk")
+    assert milk["project_id"] != old
+    assert env.ot.projects_[milk["project_id"]]["name"] == "Groceries"
+    assert env.ot.projects_[old]["archived"] is True
     env.assert_quiet()
 
 
@@ -177,6 +261,20 @@ def test_wont_do_counts_as_completed(env: Env) -> None:
     assert env.ot_by_title("Report")["completed_at"] is not None
 
 
+def test_completed_then_deleted_in_ticktick_then_edited_in_opentodo(env: Env) -> None:
+    """It failed every pass: a completed pair isn't fetched again, so the deletion went
+    unseen, and writing the OpenTodo edit back found no TickTick task."""
+    a, _ = seed(env)
+    env.tt.tasks[a]["status"] = 2
+    env.run()  # completed in OpenTodo too
+    del env.tt.tasks[a]  # then deleted in TickTick
+    env.ot_by_title("Inbox thing")["title"] = "Inbox thing, edited"
+    res = env.run()
+    assert res.ok and res.ot.deleted == 1, res.summary()  # deleted in TickTick wins
+    assert env.ot_by_title("Inbox thing, edited")["deleted_at"] is not None
+    env.assert_quiet()
+
+
 def test_reopen_in_opentodo_reopens_in_ticktick(env: Env) -> None:
     _, b = seed(env)
     env.tt.tasks[b]["status"] = 2
@@ -231,6 +329,46 @@ def test_delete_in_opentodo_but_changed_in_ticktick_recreates(env: Env) -> None:
     env.assert_quiet()
 
 
+def test_a_field_ticktick_ignores_is_reported(
+    env: Env, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The readback's hash is recorded, so an ignored field left the apps different without a
+    word. Whether TickTick clears a due date on ``dueDate: null`` is unverified."""
+    seed(env)
+    update = env.tt.update_task
+
+    def keeps_its_due(task_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        if body.get("dueDate") is None:
+            body = {k: v for k, v in body.items() if k not in ("dueDate", "startDate")}
+        return update(task_id, body)
+
+    monkeypatch.setattr(env.tt, "update_task", keeps_its_due)
+    env.ot_by_title("Report")["priority"] = 2  # an ordinary edit: nothing to report
+    env.run()
+    assert "didn't take" not in caplog.text
+    env.ot_by_title("Report")["due"] = None  # cleared in OpenTodo
+    env.run()
+    assert "TickTick didn't take the due of 'Report'" in caplog.text
+
+
+def test_a_field_opentodo_ignores_is_reported(
+    env: Env, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _, b = seed(env)
+    update = env.ot.update_task
+
+    def ignores_priority(task_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        return update(task_id, {k: v for k, v in body.items() if k != "priority"})
+
+    monkeypatch.setattr(env.ot, "update_task", ignores_priority)
+    env.tt.tasks[b]["content"] = "Q4 numbers"  # an ordinary edit: nothing to report
+    env.run()
+    assert "didn't take" not in caplog.text
+    env.tt.tasks[b]["priority"] = 1
+    env.run()
+    assert "OpenTodo didn't take the priority of 'Report'" in caplog.text
+
+
 def test_move_between_projects_in_opentodo(env: Env) -> None:
     a, _ = seed(env)
     otp = next(iter(env.ot.projects_))
@@ -238,6 +376,88 @@ def test_move_between_projects_in_opentodo(env: Env) -> None:
     env.run()
     assert env.tt.projects_[env.tt.tasks[a]["projectId"]]["name"] == "Work"
     assert ("move", a) in env.tt.writes
+    env.assert_quiet()
+
+
+def _moved_in_ticktick(env: Env) -> str:
+    """'Report' moved from Work to a new list Home in the TickTick app, and synced."""
+    _, b = seed(env)
+    home = env.tt.add_project("Home")
+    env.tt.tasks[b]["projectId"] = home
+    env.run()
+    assert next(p for p in env.state.pairs() if p.tt_id == b).tt_project == home
+    return b
+
+
+def test_moved_in_ticktick_then_completed_completes_in_opentodo(env: Env) -> None:
+    """The completed task was looked up under its old list: a 404 read as "deleted"."""
+    b = _moved_in_ticktick(env)
+    env.tt.tasks[b]["status"] = 2
+    res = env.run()
+    assert res.ot.completed == 1 and not res.ot.deleted, res.summary()
+    report = env.ot_by_title("Report")
+    assert report["completed_at"] is not None and report["deleted_at"] is None
+    env.assert_quiet()
+
+
+def test_moved_in_ticktick_then_deleted_in_opentodo_stays_deleted(env: Env) -> None:
+    """The DELETE went to the old list: its 404 was ignored and the task came back."""
+    b = _moved_in_ticktick(env)
+    env.ot.delete_task(env.ot_by_title("Report")["id"])
+    res = env.run()
+    assert res.tt.deleted == 1, res.summary()
+    assert b not in env.tt.tasks
+    env.assert_quiet()
+    assert all(t["title"] != "Report" for t in env.ot.live())
+
+
+def test_deletions_over_a_day_are_capped(env: Env) -> None:
+    """A fault deleting a few tasks every pass never tripped the per-pass guard (review #16)."""
+    clock = [1_800_000_000_000]
+
+    def run(**kw: Any) -> PassResult:
+        syncer = Syncer(env.tt, env.ot, env.state, max_deletes_per_day=3, now_ms=lambda: clock[0])
+        return syncer.run(dry_run=False, **kw)
+
+    def delete_in_ticktick(*ids: str) -> None:
+        for tid in ids:
+            del env.tt.tasks[tid]
+
+    work = env.tt.add_project("Work")
+    tids = [env.tt.add_task(f"t{i}", work) for i in range(6)]
+    run()
+    delete_in_ticktick(*tids[:2])
+    assert run().ot.deleted == 2  # 2 of 3 for the day
+    delete_in_ticktick(*tids[2:4])
+    writes = len(env.ot.writes)
+    res = run()
+    assert res.blocked and "MAX_DELETES_PER_DAY" in res.blocked
+    assert len(env.ot.writes) == writes and env.state.get_meta_json("blocked")
+    assert run(allow_bulk=True).ot.deleted == 2
+    assert deletes_in_last_day(env.state, clock[0]) == 2  # approved ones don't count
+    assert env.state.get_meta_json("blocked") is None
+    clock[0] += 25 * 60 * 60 * 1000  # a day later
+    delete_in_ticktick(*tids[4:])
+    assert run().ot.deleted == 2
+
+
+def test_many_new_tasks_at_once_block(env: Env) -> None:
+    """Restoring an older state backup unpairs every task made since: each would be duplicated
+    in both apps in one pass (review #22)."""
+
+    def run(**kw: Any) -> PassResult:
+        return Syncer(env.tt, env.ot, env.state, max_creates=3).run(dry_run=False, **kw)
+
+    for i in range(5):
+        env.tt.add_task(f"seed {i}")
+    assert run().ot.created == 5  # the first seed isn't capped
+    for i in range(4):
+        env.tt.add_task(f"new {i}")
+    writes = len(env.ot.writes)
+    res = run()
+    assert res.blocked and "MAX_CREATES" in res.blocked
+    assert len(env.ot.writes) == writes
+    assert run(allow_bulk=True).ot.created == 4
     env.assert_quiet()
 
 
@@ -256,10 +476,45 @@ def test_bulk_guard_blocks_then_allow_bulk(env: Env) -> None:
 
 
 def test_first_sync_refuses_when_opentodo_has_open_tasks(env: Env) -> None:
-    env.tt.add_task("tt")
-    env.ot.add_task("leftover from import")
+    """Nothing at all is written, lists and projects included (they used to be)."""
+    env.tt.add_task("tt", env.tt.add_project("Work"))
+    env.ot.add_task("leftover from import", env.ot.add_project("Old"))
     res = env.run()
     assert res.refused and env.ot.writes == [] and env.tt.writes == []
+
+
+def test_unwritable_state_writes_nothing_to_either_app(env: Env) -> None:
+    """A create whose pair can't be recorded is made again by every later pass, and its copy
+    copied back: before the write check, the duplicates doubled each pass (disk full)."""
+    seed(env)
+    env.tt.add_task("New in TickTick")
+    env.ot.add_task("New in OpenTodo")
+    writes = (len(env.tt.writes), len(env.ot.writes))
+    deny_writes(env.state)
+    for _ in range(3):
+        with pytest.raises(sqlite3.DatabaseError):
+            env.run()
+    assert (len(env.tt.writes), len(env.ot.writes)) == writes
+
+    env.state.db.set_authorizer(None)  # space freed
+    res = env.run()
+    assert (res.tt.created, res.ot.created) == (1, 1), res.summary()
+    env.assert_quiet()
+
+
+def test_state_error_mid_pass_stops_it(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The disk fills after the write check: the pass stops at the first pair it can't record."""
+    seed(env)
+    env.tt.add_task("One")
+    env.tt.add_task("Two")
+
+    def disk_full(*_: object, **__: object) -> None:
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(State, "put_pair", disk_full)
+    with pytest.raises(sqlite3.OperationalError):
+        env.run()
+    assert len([t for t in env.ot.live() if t["title"] in ("One", "Two")]) == 1
 
 
 def test_closed_list_is_out_of_scope(env: Env) -> None:
@@ -424,6 +679,32 @@ def subtasks(env: Env, parent_title: str) -> dict[str, dict[str, Any]]:
 
 def tt_items(env: Env, tid: str) -> dict[str, dict[str, Any]]:
     return {str(i["title"]): i for i in env.tt.tasks[tid]["items"]}
+
+
+def test_whole_task_write_keeps_a_tick_made_during_the_pass(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The write was built on the copy read at the start of the pass, checklist included: a
+    tick made in TickTick meanwhile was undone."""
+    tid = _checklist(env)
+    env.ot_by_title("Pack")["due"] = {"date": "2026-12-01"}  # edited in OpenTodo
+    check_writable = State.check_writable
+
+    def ticked_meanwhile(state: State) -> None:
+        # Runs once the pass has read both apps, just before it writes.
+        tt_items(env, tid)["Socks"]["status"] = 1  # ticked in TickTick meanwhile
+        check_writable(state)
+
+    monkeypatch.setattr(State, "check_writable", ticked_meanwhile)
+    res = env.run()
+    assert res.ok and not res.tt.updated, res.summary()  # left for the next pass
+    assert tt_items(env, tid)["Socks"]["status"] == 1
+    monkeypatch.undo()
+    res = env.run()
+    assert res.tt.updated == 1, res.summary()
+    assert env.tt.tasks[tid]["dueDate"] and tt_items(env, tid)["Socks"]["status"] == 1
+    assert subtasks(env, "Pack")["Socks"]["completed_at"] is not None
+    env.assert_quiet()
 
 
 def test_checklist_items_become_subtasks(env: Env) -> None:

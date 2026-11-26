@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
-from fakes import FakeOpenTodo, FakeTickTick
+from fakes import FakeOpenTodo, FakeTickTick, deny_writes
 
 from ticktick_opentodo_sync.habit_sync import META_PROJECT
 from ticktick_opentodo_sync.habits import (
@@ -21,6 +22,7 @@ from ticktick_opentodo_sync.habits import (
     habit_from_tt,
     habit_to_ot,
     habit_to_tt,
+    match_habits,
     ot_done_days,
     plan_days,
     plan_habits,
@@ -28,7 +30,7 @@ from ticktick_opentodo_sync.habits import (
     window,
 )
 from ticktick_opentodo_sync.opentodo import PLACEHOLDER
-from ticktick_opentodo_sync.state import State
+from ticktick_opentodo_sync.state import State, habit_refused
 from ticktick_opentodo_sync.sync import PassResult, Syncer
 
 DAILY = "RRULE:FREQ=WEEKLY;INTERVAL=1;BYDAY=SU,MO,TU,WE,TH,FR,SA"
@@ -158,6 +160,16 @@ def test_plan_habits() -> None:
     assert kinds == [HKind.CREATE_OT, HKind.CREATE_TT]
 
 
+def test_match_habits() -> None:
+    walk, run = HabitDef("Walk", EVERY_DAY), HabitDef("Run", EVERY_DAY)
+    tt = {"t1": H, "t2": walk, "t3": run, "t4": run, "t5": HabitDef("Only in TickTick")}
+    ot = {"o1": HabitDef(" read "), "o2": HabitDef("WALK"), "o3": run, "o4": HabitDef("Mine")}
+    pairs = [HabitPair("t1", "o9", "", "")]  # t1 is paired with another habit already
+    matches, ambiguous = match_habits(pairs, tt, ot)
+    assert matches == [("t2", "o2")]  # by name, ignoring case and spaces
+    assert ambiguous == {"run"}  # twice in TickTick: neither side's copy is made
+
+
 def test_plan_days() -> None:
     days = ["d1", "d2", "d3", "d4", "d5"]
     tt = {("t", "d1"), ("t", "d2"), ("t", "d4")}
@@ -170,6 +182,10 @@ def test_plan_days() -> None:
         "d4": DKind.CLEAR_TT,  # OpenTodo un-checked it
         "d5": DKind.CHECK_TT,  # OpenTodo checked it
     }
+    # A check-in OpenTodo refused isn't offered again; nothing else changes.
+    refused = {("t", "d2"), ("t", "d3")}
+    rows = {a.day: a.kind for a in plan_days([("t", "o")], days, tt, ot, base, refused=refused)}
+    assert rows == {"d3": DKind.CLEAR_OT, "d4": DKind.CLEAR_TT, "d5": DKind.CHECK_TT}
 
 
 def test_window() -> None:
@@ -281,6 +297,29 @@ def test_missed_days_then_a_check_in_moves_the_opentodo_habit(env: Env) -> None:
     env.quiet()
 
 
+def test_day_opentodo_refuses_stays_in_ticktick(env: Env) -> None:
+    """OpenTodo takes no day before a habit's first one: a TickTick back-fill stays there.
+
+    It used to be recorded as synced anyway, so the next pass read OpenTodo's gap as an
+    un-check and cleared the day in TickTick.
+    """
+    hid = env.tt.add_habit("Read")
+    env.tt.checkins[(hid, 20261120)] = 2
+    env.run()  # the OpenTodo habit starts on 11-20
+    habit = env.ot_habit("Read")
+    env.tt.checkins[(hid, 20261115)] = 2  # back-filled in TickTick
+    res = env.run()  # OpenTodo refuses 11-15
+    assert not res.habits_ot.completed and not res.habits_tt.deleted, res.summary()
+    assert habit_refused(env.state) == {(hid, "2026-11-15")}
+    env.quiet()  # not offered again, and not cleared in TickTick
+    assert env.tt_days(hid) == [20261115, 20261120]
+    assert env.ot_days(habit) == ["2026-11-20"]
+
+    env.tt.checkins[(hid, 20261115)] = 0  # un-checked in TickTick: nothing left to remember
+    env.quiet()
+    assert habit_refused(env.state) == set()
+
+
 def test_opentodo_habit_is_created_in_ticktick(env: Env) -> None:
     oid = env.ot.add_task(
         "Stretch",
@@ -322,6 +361,98 @@ def test_definition_changes(env: Env) -> None:
     assert res.habits_tt.updated == 1, res.summary()
     assert env.tt.habits_[hid]["sectionId"] == "s-a"
     env.quiet()
+
+
+def test_state_reset_pairs_habits_and_the_habits_project_again(env: Env, tmp_path: Path) -> None:
+    """After a reset (README: then --match-existing), every habit was created again on both
+    sides, and TickTick habits can't be deleted through the API. The old "Habits" project
+    became a TickTick list."""
+    read = env.tt.add_habit("Read")
+    env.tt.add_habit("Walk")
+    env.tt.checkins[(read, 20261123)] = 2
+    env.run()
+    env.state.close()
+    env.state = State(tmp_path / "reset.db")
+    Syncer(env.tt, env.ot, env.state, now_ms=lambda: NOW).match_existing(dry_run=False)
+    res = env.run()
+    assert not res.habits_tt.created and not res.habits_ot.created, res.summary()
+    assert len(env.tt.habits_) == 2
+    assert sum(1 for t in env.ot.tasks_.values() if t.get("habit")) == 2
+    assert not env.tt.projects_
+    assert env.tt_days(read) == [20261123]
+    env.quiet()
+
+
+def test_same_habit_made_in_both_apps_is_paired(env: Env) -> None:
+    env.tt.add_habit("Stretch")
+    env.ot.add_task("stretch", None, habit=True, recurrence=EVERY_DAY, due={"date": "2026-11-24"})
+    res = env.run()
+    assert not res.habits_tt.created and not res.habits_ot.created, res.summary()
+    assert len(env.tt.habits_) == 1
+    assert env.ot_habit("Stretch")  # TickTick's definition won, name included
+    env.quiet()
+
+
+def test_ambiguous_habit_names_are_left_alone(env: Env) -> None:
+    env.tt.add_habit("Read")
+    env.tt.add_habit("Read")
+    env.ot.add_task("Read", None, habit=True, recurrence=EVERY_DAY, due={"date": "2026-11-24"})
+    res = env.run()
+    assert not res.habits_tt.created and not res.habits_ot.created, res.summary()
+    assert len(env.tt.habits_) == 2
+    env.quiet()
+
+
+def test_clearing_many_check_ins_blocks_the_pass(env: Env) -> None:
+    """The habit guard counted as an error, so --status and the summary never said BLOCKED."""
+    hid = env.tt.add_habit("Read")
+    for stamp in range(20261110, 20261122):  # 12 days
+        env.tt.checkins[(hid, stamp)] = 2
+    env.run()
+    habit = env.ot_habit("Read")
+    for day in env.ot_days(habit):  # un-checked in OpenTodo
+        env.ot.log_habit(habit["id"], day, "clear", None)
+    res = Syncer(env.tt, env.ot, env.state, now_ms=lambda: NOW).run(dry_run=False)
+    assert res.blocked and "12 check-ins" in res.blocked and not res.errors
+    assert "BLOCKED" in res.summary() and env.state.get_meta_json("blocked")
+    assert len(env.tt_days(hid)) == 12  # none cleared in TickTick
+
+
+def test_an_empty_check_in_answer_clears_nothing(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One empty answer from TickTick read as every synced day un-checked there, and cleared
+    them all in OpenTodo: only TickTick-side clears were guarded."""
+    hid = env.tt.add_habit("Read")
+    for stamp in range(20261110, 20261122):  # 12 days
+        env.tt.checkins[(hid, stamp)] = 2
+    env.run()
+    habit = env.ot_habit("Read")
+    with monkeypatch.context() as m:
+        m.setattr(env.tt, "habit_checkins", lambda *_: [])
+        res = Syncer(env.tt, env.ot, env.state, now_ms=lambda: NOW).run(dry_run=False)
+    assert res.blocked and "12 check-ins" in res.blocked and "12 in OpenTodo" in res.blocked
+    assert len(env.ot_days(habit)) == 12
+    env.quiet()  # the next answer is whole again: nothing to do, and the block lifts
+    assert env.state.get_meta_json("blocked") is None
+
+
+def test_unwritable_state_creates_no_habit(env: Env) -> None:
+    """A habit created without its pair recorded would be created again every pass, and
+    TickTick habits can't be deleted through the API."""
+    env.run()  # records the inbox id: from here on only the habit writes anything
+    env.tt.add_habit("Read")
+    deny_writes(env.state)
+    with pytest.raises(sqlite3.DatabaseError):
+        env.run()
+    assert not env.ot.writes and not env.tt.writes
+
+
+def test_unsupported_habit_is_warned_about_once(env: Env, caplog: pytest.LogCaptureFixture) -> None:
+    """The habit sync is rebuilt every pass, so "once per process" meant every 5 minutes."""
+    env.tt.add_habit("Water", type="Real", goal=8.0)
+    syncer = Syncer(env.tt, env.ot, env.state, now_ms=lambda: NOW)  # one process, two passes
+    syncer.run(dry_run=False)
+    syncer.run(dry_run=False)
+    assert caplog.text.count("TickTick habit 'Water' not synced") == 1
 
 
 def test_unsupported_and_archived_habits_are_left_alone(env: Env) -> None:

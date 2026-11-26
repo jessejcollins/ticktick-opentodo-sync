@@ -9,3 +9,6 @@ state
 .ruff_cache
 .pytest_cache
 docs
+CLAUDE.local.md
+*.sqlite3*
+*.log

@@ -30,7 +30,8 @@ class Pair:
     tt_hash: str
     ot_hash: str
     tt_project: str
-    """Real TickTick project id the task was last seen in (needed for GET/DELETE)."""
+    """Real TickTick project id the task was last seen in (needed for GET/DELETE); refreshed
+    each pass the task is seen."""
     base: Task | None = None
     """Content at the last sync; ``None`` for pairs made by --match-existing."""
 

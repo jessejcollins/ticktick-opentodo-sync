@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import email.utils
 import json
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -50,10 +52,118 @@ def test_retry_on_429_honours_retry_after() -> None:
 
 
 @respx.mock
+@pytest.mark.parametrize(
+    "value", ["-1", "0", "nan", "inf", "soon", "Wed, 21 Oct 2015 07:28:00 GMT"]
+)
+def test_unusable_retry_after_falls_back_to_the_backoff(value: str) -> None:
+    """time.sleep raised on a negative or NaN Retry-After, failing the pass (review #18)."""
+    sleeps: list[float] = []
+    respx.get(f"{TT}/open/v1/project").mock(
+        side_effect=[
+            httpx.Response(503, headers={"Retry-After": value}),
+            httpx.Response(200, json=[]),
+        ]
+    )
+    assert TickTick(http(TT, sleeps)).projects() == []
+    assert sleeps == [1.0]  # the backoff's first step
+
+
+@respx.mock
+def test_retry_after_as_an_http_date() -> None:
+    sleeps: list[float] = []
+    when = email.utils.format_datetime(datetime.now(UTC) + timedelta(seconds=30), usegmt=True)
+    respx.get(f"{TT}/open/v1/project").mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": when}),
+            httpx.Response(200, json=[]),
+        ]
+    )
+    assert TickTick(http(TT, sleeps)).projects() == []
+    assert 25 < sleeps[0] <= 30
+
+
+@respx.mock
 def test_gives_up_and_raises() -> None:
     respx.get(f"{TT}/open/v1/project").mock(return_value=httpx.Response(500, text="boom"))
     with pytest.raises(ApiError, match="HTTP 500"):
         TickTick(http(TT)).projects()
+
+
+@respx.mock
+def test_create_or_completion_not_repeated_after_an_unknown_outcome(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A repeated create whose answer was lost made a duplicate, and a repeated completion
+    moved a repeating task on twice (review #7)."""
+    tt = TickTick(http(TT))
+    create = respx.post(f"{TT}/open/v1/task")
+    unknown: list[Exception | httpx.Response] = [
+        httpx.ReadTimeout("slow"),
+        httpx.RemoteProtocolError("dropped"),
+        httpx.Response(500),
+        httpx.Response(502),
+        httpx.Response(503),  # without Retry-After
+        httpx.Response(504),
+    ]
+    for answer in unknown:
+        before = create.call_count
+        create.mock(side_effect=[answer, httpx.Response(200, json={"id": "t"})])
+        with pytest.raises((httpx.TransportError, ApiError)):
+            tt.create_task({"title": "x", "projectId": "p"})
+        assert create.call_count == before + 1
+    assert "may have gone through" in caplog.text
+
+    complete = respx.post(f"{TT}/open/v1/project/p/task/t/complete").mock(
+        side_effect=[httpx.Response(504), httpx.Response(200)]
+    )
+    with pytest.raises(ApiError, match="504"):
+        tt.complete_task("p", "t")
+    assert complete.call_count == 1
+
+
+@respx.mock
+def test_create_repeated_when_it_cannot_have_gone_through() -> None:
+    tt = TickTick(http(TT))
+    create = respx.post(f"{TT}/open/v1/task")
+    not_acted_on: list[Exception | httpx.Response] = [
+        httpx.ConnectError("refused"),
+        httpx.ConnectTimeout("no route"),
+        httpx.Response(429),
+        httpx.Response(503, headers={"Retry-After": "1"}),
+    ]
+    for answer in not_acted_on:
+        create.mock(side_effect=[answer, httpx.Response(200, json={"id": "t"})])
+        assert tt.create_task({"title": "x", "projectId": "p"}) == {"id": "t"}
+
+
+@respx.mock
+def test_repeatable_requests_are_retried() -> None:
+    """Updates, reads sent as POST, and creates carrying an Idempotency-Key."""
+    tt = TickTick(http(TT))
+    upd = respx.post(f"{TT}/open/v1/task/t1").mock(
+        side_effect=[
+            httpx.ReadTimeout("slow"),
+            httpx.Response(502),
+            httpx.Response(200, json={"id": "t1"}),
+        ]
+    )
+    assert tt.update_task("t1", {"title": "x"}) == {"id": "t1"}
+    assert upd.call_count == 3
+
+    pref = respx.post(f"{TT}/open/v1/preference").mock(
+        side_effect=[httpx.Response(500), httpx.Response(200, json={"timeZone": "UTC"})]
+    )
+    assert tt.preference_timezone() == "UTC" and pref.call_count == 2
+
+    create = respx.post(f"{OT}/api/v1/projects").mock(
+        side_effect=[
+            httpx.ReadTimeout("slow"),
+            httpx.Response(201, json={"id": "p1", "name": "Work"}),
+        ]
+    )
+    assert OpenTodo(http(OT)).create_project("Work")["id"] == "p1"
+    # The same key both times, so OpenTodo dedupes the retry.
+    assert len({c.request.headers["Idempotency-Key"] for c in create.calls}) == 1
 
 
 @respx.mock
@@ -202,6 +312,106 @@ def test_odd_responses_never_read_as_nothing(body: object) -> None:
     if not isinstance(body, list):  # a list is TickTick's normal shape
         with pytest.raises(TypeError):
             TickTick(http(TT)).projects()
+
+
+@respx.mock
+@pytest.mark.parametrize("body", [None, [], {}, {"errorCode": "x", "errorMessage": "y"}])
+def test_odd_list_data_is_an_error_not_an_empty_list(body: object) -> None:
+    """Read as "no tasks", every paired task in the list looked deleted (review #6)."""
+    content = b"" if body is None else json.dumps(body).encode()
+    respx.get(f"{TT}/open/v1/project/p/data").mock(
+        return_value=httpx.Response(200, content=content)
+    )
+    with pytest.raises(TypeError, match="list p"):
+        TickTick(http(TT)).project_data("p")
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"project": {"id": "p"}, "tasks": [], "columns": []},
+        {"tasks": [{"id": "t"}]},
+        {"project": {"id": "p"}, "columns": []},  # an empty list without "tasks"
+    ],
+)
+def test_list_data(body: dict[str, object]) -> None:
+    respx.get(f"{TT}/open/v1/project/p/data").mock(return_value=httpx.Response(200, json=body))
+    assert TickTick(http(TT)).project_data("p") == body
+
+
+@respx.mock
+def test_get_task_answers() -> None:
+    tt = TickTick(http(TT))
+    route = respx.get(f"{TT}/open/v1/project/p/task/t")
+    route.mock(return_value=httpx.Response(200, json={"id": "t", "status": 2}))
+    assert tt.get_task("p", "t") == {"id": "t", "status": 2}
+    for gone in (httpx.Response(404), httpx.Response(200), httpx.Response(200, json={})):
+        route.mock(return_value=gone)
+        assert tt.get_task("p", "t") is None
+    odd_answers: list[object] = [[], {"errorCode": "x"}, {"id": "another"}]
+    for odd in odd_answers:
+        route.mock(return_value=httpx.Response(200, json=odd))
+        with pytest.raises(TypeError, match="task t"):
+            tt.get_task("p", "t")
+
+
+def _lists(n: int) -> list[dict[str, str]]:
+    return [{"id": f"l{i}", "name": f"List {i}"} for i in range(n)]
+
+
+@respx.mock
+@pytest.mark.parametrize("total", [3, 200, 250, 401])
+def test_ticktick_lists_are_paged(total: int) -> None:
+    """Lists past the 200th were missing: read as deleted, their projects archived."""
+    lists = _lists(total)
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        offset, limit = (int(request.url.params[k]) for k in ("offset", "limit"))
+        return httpx.Response(200, json=lists[offset : offset + limit])
+
+    route = respx.get(f"{TT}/open/v1/project").mock(side_effect=answer)
+    assert TickTick(http(TT)).projects() == lists
+    assert route.call_count == total // 200 + 1
+
+
+@respx.mock
+def test_ticktick_list_offset_ignored_is_an_error() -> None:
+    respx.get(f"{TT}/open/v1/project").mock(return_value=httpx.Response(200, json=_lists(200)))
+    with pytest.raises(TypeError, match="offset"):
+        TickTick(http(TT)).projects()  # the same 200 again: more may be missing
+
+
+@respx.mock
+def test_ticktick_list_limit_ignored_is_everything() -> None:
+    lists = _lists(250)
+    route = respx.get(f"{TT}/open/v1/project").mock(return_value=httpx.Response(200, json=lists))
+    assert TickTick(http(TT)).projects() == lists
+    assert route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "more",
+    [{"has_more": True}, {"next_cursor": "c2"}, {"next": "/api/v1/projects?p=2"}, {"total": 3}],
+)
+def test_opentodo_listing_that_says_it_is_one_page(more: dict[str, object]) -> None:
+    body = {"projects": [{"id": "p", "name": "x"}]} | more
+    respx.get(f"{OT}/api/v1/projects").mock(return_value=httpx.Response(200, json=body))
+    with pytest.raises(TypeError, match="one page of projects"):
+        OpenTodo(http(OT)).projects()
+
+
+@respx.mock
+def test_opentodo_listing_with_harmless_paging_fields() -> None:
+    body = {
+        "labels": [{"id": "l", "name": "x"}],
+        "total": 1,
+        "next_cursor": None,
+        "has_more": False,
+    }
+    respx.get(f"{OT}/api/v1/labels").mock(return_value=httpx.Response(200, json=body))
+    assert len(OpenTodo(http(OT)).labels()) == 1
 
 
 @respx.mock

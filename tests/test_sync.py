@@ -12,7 +12,7 @@ from fakes import FakeOpenTodo, FakeTickTick, deny_writes
 
 from ticktick_opentodo_sync.opentodo import PLACEHOLDER
 from ticktick_opentodo_sync.state import State
-from ticktick_opentodo_sync.sync import PassResult, Syncer
+from ticktick_opentodo_sync.sync import PassResult, Syncer, deletes_in_last_day
 
 NY = "America/New_York"
 
@@ -400,6 +400,36 @@ def test_moved_in_ticktick_then_deleted_in_opentodo_stays_deleted(env: Env) -> N
     assert b not in env.tt.tasks
     env.assert_quiet()
     assert all(t["title"] != "Report" for t in env.ot.live())
+
+
+def test_deletions_over_a_day_are_capped(env: Env) -> None:
+    """A fault deleting a few tasks every pass never tripped the per-pass guard (review #16)."""
+    clock = [1_800_000_000_000]
+
+    def run(**kw: Any) -> PassResult:
+        syncer = Syncer(env.tt, env.ot, env.state, max_deletes_per_day=3, now_ms=lambda: clock[0])
+        return syncer.run(dry_run=False, **kw)
+
+    def delete_in_ticktick(*ids: str) -> None:
+        for tid in ids:
+            del env.tt.tasks[tid]
+
+    work = env.tt.add_project("Work")
+    tids = [env.tt.add_task(f"t{i}", work) for i in range(6)]
+    run()
+    delete_in_ticktick(*tids[:2])
+    assert run().ot.deleted == 2  # 2 of 3 for the day
+    delete_in_ticktick(*tids[2:4])
+    writes = len(env.ot.writes)
+    res = run()
+    assert res.blocked and "MAX_DELETES_PER_DAY" in res.blocked
+    assert len(env.ot.writes) == writes and env.state.get_meta_json("blocked")
+    assert run(allow_bulk=True).ot.deleted == 2
+    assert deletes_in_last_day(env.state, clock[0]) == 2  # approved ones don't count
+    assert env.state.get_meta_json("blocked") is None
+    clock[0] += 25 * 60 * 60 * 1000  # a day later
+    delete_in_ticktick(*tids[4:])
+    assert run().ot.deleted == 2
 
 
 def test_bulk_guard_blocks_then_allow_bulk(env: Env) -> None:

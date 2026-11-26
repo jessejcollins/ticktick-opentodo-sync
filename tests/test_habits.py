@@ -403,6 +403,21 @@ def test_ambiguous_habit_names_are_left_alone(env: Env) -> None:
     env.quiet()
 
 
+def test_clearing_many_check_ins_blocks_the_pass(env: Env) -> None:
+    """The habit guard counted as an error, so --status and the summary never said BLOCKED."""
+    hid = env.tt.add_habit("Read")
+    for stamp in range(20261110, 20261122):  # 12 days
+        env.tt.checkins[(hid, stamp)] = 2
+    env.run()
+    habit = env.ot_habit("Read")
+    for day in env.ot_days(habit):  # un-checked in OpenTodo
+        env.ot.log_habit(habit["id"], day, "clear", None)
+    res = Syncer(env.tt, env.ot, env.state, now_ms=lambda: NOW).run(dry_run=False)
+    assert res.blocked and "12 check-ins" in res.blocked and not res.errors
+    assert "BLOCKED" in res.summary() and env.state.get_meta_json("blocked")
+    assert len(env.tt_days(hid)) == 12  # none cleared in TickTick
+
+
 def test_unwritable_state_creates_no_habit(env: Env) -> None:
     """A habit created without its pair recorded would be created again every pass, and
     TickTick habits can't be deleted through the API."""

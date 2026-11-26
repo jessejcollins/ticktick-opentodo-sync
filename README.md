@@ -193,7 +193,9 @@ If a pass would delete or complete more than `TICKTICK_OPENTODO_SYNC_MAX_DESTRUC
 docker compose run --rm ticktick-opentodo-sync --apply --allow-bulk
 ```
 
-The same limit applies to habit check-ins being cleared in TickTick.
+The same limit applies to habit check-ins being cleared in TickTick: those block the same way, after the task changes of that pass are written.
+
+Deletions are also limited over time. If a pass would take the deletions of the last 24 hours past `TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY` (default 50), it blocks the same way. This catches a fault that deletes a few tasks every pass and so never trips the per-pass limit. Deletions you approve with `--allow-bulk` don't count. `--status` shows the count so far: `deletes (24 h): 3 of 50`.
 
 ### Exit codes
 

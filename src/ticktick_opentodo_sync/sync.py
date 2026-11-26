@@ -105,7 +105,8 @@ class PassResult:
     conflicts: int = 0
     errors: int = 0
     blocked: str | None = None
-    """Bulk-delete guard tripped; nothing was written."""
+    """A bulk guard tripped and what it guards wasn't written: nothing at all for the task
+    guards, the habit check-ins for the habit guard (which runs after the task pass)."""
     refused: str | None = None
     """First-sync guard tripped; nothing was written."""
 
@@ -185,6 +186,7 @@ class Syncer:
         *,
         timezone: str | None = None,
         max_destructive: int = 10,
+        max_deletes_per_day: int = 50,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
         self.tt = tt
@@ -192,6 +194,7 @@ class Syncer:
         self.state = state
         self.timezone = timezone
         self.max_destructive = max_destructive
+        self.max_deletes_per_day = max_deletes_per_day
         self.now_ms = now_ms
         self.run_id = str(now_ms())
 
@@ -674,7 +677,11 @@ class Syncer:
         if not dry_run:
             if dropped := self.state.drop_orphan_items():
                 log.info("forgot %d checklist item pair(s) of tasks no longer synced", dropped)
-            self.state.set_meta("blocked", None)
+            if res.blocked is None:  # the habit guard may have tripped after the task pass
+                self.state.set_meta("blocked", None)
+            deleted = res.tt.deleted + res.ot.deleted + res.tt_items.deleted
+            if deleted and not allow_bulk:  # deletions approved with --allow-bulk don't count
+                record_deletes(self.state, self.now_ms(), deleted)
             if res.changed or res.errors:
                 self.state.set_meta_json("last_change", {"at": self.now_ms()} | res.to_json())
         return res
@@ -699,29 +706,50 @@ class Syncer:
         # Parents before their subtasks, so a new subtask's parent exists when it is created.
         actions.sort(key=lambda a: a.task is not None and a.task.parent is not None)
         item_actions = self._plan_items(w, actions)
+        if allow_bulk:
+            return actions, item_actions
         # Item deletions in TickTick (the source of truth) count; OpenTodo's copies don't.
-        n_destructive = engine.destructive_count(actions) + sum(
-            a.kind is Kind.DELETE_TT for a in item_actions
-        )
-        if n_destructive > self.max_destructive and not allow_bulk:
-            res.blocked = (
+        item_deletes = [a for a in item_actions if a.kind is Kind.DELETE_TT]
+        n_destructive = engine.destructive_count(actions) + len(item_deletes)
+        if n_destructive > self.max_destructive:
+            self._block(
+                res,
                 f"{n_destructive} deletes/completions exceed "
                 f"TICKTICK_OPENTODO_SYNC_MAX_DESTRUCTIVE={self.max_destructive}; "
-                "nothing written. Review, then run once with --allow-bulk."
+                "nothing written. Review, then run once with --allow-bulk.",
+                [self._describe(a, w) for a in actions if a.destructive]
+                + [self._describe_item(a, w) for a in item_deletes],
+                dry_run=dry_run,
             )
-            log.warning("%s", res.blocked)
-            for a in actions:
-                if a.destructive:
-                    log.warning("  blocked: %s", self._describe(a, w))
-            for a in item_actions:
-                if a.kind is Kind.DELETE_TT:
-                    log.warning("  blocked: %s", self._describe_item(a, w))
-            if not dry_run:
-                self.state.set_meta_json(
-                    "blocked", {"at": self.now_ms(), "count": n_destructive, "reason": res.blocked}
-                )
             return None
+        # Over a day too: a fault deleting a few tasks every pass never trips the guard above.
+        deletes = [a for a in actions if a.kind in (Kind.DELETE_OT, Kind.DELETE_TT)]
+        if deletes or item_deletes:
+            n = len(deletes) + len(item_deletes)
+            recent = deletes_in_last_day(self.state, self.now_ms())
+            if recent + n > self.max_deletes_per_day:
+                self._block(
+                    res,
+                    f"{n} deletions on top of {recent} in the last 24 hours exceed "
+                    f"TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY={self.max_deletes_per_day}; "
+                    "nothing written. Review, then run once with --allow-bulk.",
+                    [self._describe(a, w) for a in deletes]
+                    + [self._describe_item(a, w) for a in item_deletes],
+                    dry_run=dry_run,
+                )
+                return None
         return actions, item_actions
+
+    def _block(self, res: PassResult, reason: str, blocked: list[str], *, dry_run: bool) -> None:
+        """A guard tripped: log what it holds back and record it (``--status``, health)."""
+        res.blocked = reason
+        log.warning("%s", reason)
+        for line in blocked:
+            log.warning("  blocked: %s", line)
+        if not dry_run:
+            self.state.set_meta_json(
+                "blocked", {"at": self.now_ms(), "count": len(blocked), "reason": reason}
+            )
 
     def _mark_tt_occurrences(self, actions: list[Action], w: World) -> list[Action]:
         """Tell a repeating task completed in TickTick from one that was only moved.
@@ -1355,6 +1383,30 @@ def _count(a: Action, res: PassResult) -> None:
         side.completed += a.completes
     elif a.kind in (Kind.DELETE_OT, Kind.DELETE_TT):
         side.deleted += 1
+
+
+DAY_MS = 24 * 60 * 60 * 1000
+RECENT_DELETES = "recent_deletes"
+"""Meta key: ``[[at_ms, count], ...]`` of the passes that deleted, for the daily budget."""
+
+
+def _recent_deletes(state: State, now_ms: int) -> list[list[int]]:
+    entries = state.get_meta_json(RECENT_DELETES) or []
+    return [
+        [int(e[0]), int(e[1])]
+        for e in entries
+        if isinstance(e, list) and len(e) == 2 and int(e[0]) > now_ms - DAY_MS
+    ]
+
+
+def deletes_in_last_day(state: State, now_ms: int) -> int:
+    """Deletions applied in the last 24 hours, except those approved with --allow-bulk."""
+    return sum(n for _, n in _recent_deletes(state, now_ms))
+
+
+def record_deletes(state: State, now_ms: int, count: int) -> None:
+    """Add a pass's deletions (written only by passes that deleted: SD card)."""
+    state.set_meta_json(RECENT_DELETES, [*_recent_deletes(state, now_ms), [now_ms, count]])
 
 
 def _check_taken(side: str, sent: Task, got: Task) -> None:

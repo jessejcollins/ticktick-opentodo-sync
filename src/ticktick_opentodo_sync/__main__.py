@@ -30,7 +30,7 @@ from .config import Config, ConfigError, load
 from .http import Http
 from .opentodo import OpenTodo
 from .state import State, file_lock
-from .sync import PassResult, Syncer
+from .sync import PassResult, Syncer, deletes_in_last_day
 from .ticktick import TickTick
 
 log = logging.getLogger("ticktick_opentodo_sync")
@@ -135,6 +135,7 @@ def _build(cfg: Config) -> tuple[Syncer, State, list[Http]]:
         state,
         timezone=cfg.timezone,
         max_destructive=cfg.max_destructive,
+        max_deletes_per_day=cfg.max_deletes_per_day,
     )
     return syncer, state, [tt_http, ot_http]
 
@@ -241,6 +242,8 @@ def _status(cfg: Config) -> int:
             print(f"  conflicts={last.get('conflicts')} errors={last.get('errors')}")
         else:
             print("last change:      never")
+        recent = deletes_in_last_day(state, int(time.time() * 1000))
+        print(f"deletes (24 h):   {recent} of {cfg.max_deletes_per_day}")
         blocked = state.get_meta_json("blocked")
         if blocked:
             print(f"BLOCKED since {_fmt_ms(blocked.get('at'))}: {blocked.get('reason')}")

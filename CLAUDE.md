@@ -26,6 +26,8 @@ The same tasks show up in both apps, so someone can keep using TickTick day to d
 - **Secrets stay out of git.** Config comes from `.env` (gitignored) next to `compose.yaml`, loaded with `env_file:`. `.env.example` documents every setting. Never print secret values in logs or output.
 - **Go easy on the SD card.** Write state only when something changed, in a single SQLite file. The per-pass heartbeat goes to tmpfs. Docker logs use `json-file` with small rotation.
 - **Never delete in bulk by accident.** If a pass would delete or complete more than N tasks (configurable, default 10), it stops, logs a warning and records the block. In one-shot mode it exits non-zero. In loop mode the container keeps running and reports unhealthy until a run with `--allow-bulk` clears the block.
+  - The same applies across passes: deletions over any 24 hours are capped too (`MAX_DELETES_PER_DAY`, default 50; `--allow-bulk` deletions don't count), so a fault that deletes a few tasks every pass is caught as well.
+  - The habit guard (check-ins cleared in TickTick) blocks the same way.
 - **Code style:** idiomatic, fully typed Python; `ruff` and `mypy --strict` clean.
 
 ## Sync rules

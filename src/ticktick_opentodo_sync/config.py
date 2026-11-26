@@ -25,6 +25,7 @@ KNOWN_SETTINGS = frozenset(
     for name in (
         "DRY_RUN",
         "MAX_DESTRUCTIVE",
+        "MAX_DELETES_PER_DAY",
         "INTERVAL",
         "TIMEZONE",
         "LOG_LEVEL",
@@ -64,6 +65,7 @@ class Config:
     run_dir: Path | None = None
     dry_run: bool = True
     max_destructive: int = 10
+    max_deletes_per_day: int = 50
     timezone: str | None = None
     interval: int = 300
     http_min_interval: float = 0.3
@@ -185,6 +187,11 @@ def load(env: Mapping[str, str] | None = None, env_file: Path | None = None) -> 
         max_destructive=_int(
             "TICKTICK_OPENTODO_SYNC_MAX_DESTRUCTIVE",
             str(get("TICKTICK_OPENTODO_SYNC_MAX_DESTRUCTIVE", "10")),
+            0,
+        ),
+        max_deletes_per_day=_int(
+            "TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY",
+            str(get("TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY", "50")),
             0,
         ),
         timezone=tz,

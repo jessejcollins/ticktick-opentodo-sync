@@ -13,6 +13,7 @@ def test_defaults() -> None:
     cfg = load(REQUIRED)
     assert cfg.dry_run is True
     assert cfg.max_destructive == 10
+    assert cfg.max_deletes_per_day == 50
     assert cfg.interval == 300
     assert cfg.opentodo_url == "https://ot.example"
     assert cfg.timezone is None
@@ -30,6 +31,7 @@ def test_missing_required() -> None:
         ("TICKTICK_OPENTODO_SYNC_TIMEZONE", "Mars/Base"),
         ("TICKTICK_OPENTODO_SYNC_INTERVAL", "10"),
         ("TICKTICK_OPENTODO_SYNC_MAX_DESTRUCTIVE", "x"),
+        ("TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY", "-1"),
         ("TICKTICK_OPENTODO_SYNC_ALLOW_HTTP", "maybe"),
         ("OPENTODO_URL", "ot.example"),
         ("OPENTODO_URL", "ftp://ot.example"),

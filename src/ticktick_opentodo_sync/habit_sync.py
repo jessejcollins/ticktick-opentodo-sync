@@ -198,13 +198,18 @@ class HabitSync:
         actions = plan_days(day_pairs, days, tt_done, ot_done, base, refused=refused)
         clears = sum(a.kind is DKind.CLEAR_TT for a in actions)
         if clears > self.max_destructive and not allow_bulk:
-            res.errors += 1
-            log.warning(
-                "habits: %d check-ins would be cleared in TickTick (more than %d); none written. "
-                "Review, then run once with --allow-bulk.",
-                clears,
-                self.max_destructive,
+            # Blocked like the task guards (BLOCKED in the summary, --status and health),
+            # rather than counted as an error.
+            res.blocked = (
+                f"habits: {clears} check-ins would be cleared in TickTick, more than "
+                f"TICKTICK_OPENTODO_SYNC_MAX_DESTRUCTIVE={self.max_destructive}; none written. "
+                "Review, then run once with --allow-bulk."
             )
+            log.warning("%s", res.blocked)
+            if not dry_run:
+                self.state.set_meta_json(
+                    "blocked", {"at": self.now_ms(), "count": clears, "reason": res.blocked}
+                )
             return
         if actions and not dry_run:
             self.state.check_writable()

@@ -9,3 +9,6 @@ dist/
 .ruff_cache/
 .pytest_cache/
 CLAUDE.local.md
+# Copies of the state and logs hold decrypted task content (README: backup, cron)
+*.sqlite3*
+*.log

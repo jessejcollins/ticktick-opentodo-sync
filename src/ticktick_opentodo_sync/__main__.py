@@ -288,6 +288,9 @@ def _health(cfg: Config) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
+    # What the sync writes (state with decrypted task content, its lock, the heartbeat) is
+    # for its own user only, whatever umask cron, systemd or a shell hands it.
+    os.umask(0o077)
     try:
         cfg = load(env_file=args.env_file)
     except (ConfigError, OSError) as exc:

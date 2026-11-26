@@ -123,7 +123,7 @@ cp .env.example .env && chmod 600 .env
 $EDITOR .env
 ```
 
-Run commands from this directory: the sync reads `./.env` (or the file given with `--env-file`) and keeps its state in `./state/`. Set `TICKTICK_OPENTODO_SYNC_STATE_DIR` in `.env` to keep state somewhere else. The [first run](#first-run) steps are the same, minus the `docker compose run --rm` prefix:
+Run commands from this directory: the sync reads `./.env` (or the file given with `--env-file`) and keeps its state in `./state/`. Set `TICKTICK_OPENTODO_SYNC_STATE_DIR` in `.env` to keep state somewhere else. The state holds decrypted task content, so the sync makes its files readable by your user only. The [first run](#first-run) steps are the same, minus the `docker compose run --rm` prefix:
 
 ```sh
 .venv/bin/ticktick-opentodo-sync --dry-run
@@ -264,7 +264,7 @@ State lives in the Docker volume `ticktick-opentodo-sync-data`, in `/data/tickti
 - a few settings;
 - the last-synced copy of each task (title, notes, dates…), used to tell which side changed.
 
-That last item is task content, decrypted, so treat the volume as private.
+That last item is task content, decrypted, so treat the volume, and any copy of it, as private. `*.sqlite3*` and `*.log` files are gitignored, so a backup or a cron log made in the checkout can't be committed by accident.
 
 ```sh
 docker compose cp ticktick-opentodo-sync:/data/ticktick-opentodo-sync.sqlite3 ./backup.sqlite3   # backup

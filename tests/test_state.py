@@ -84,6 +84,18 @@ def test_failed_commit_rolls_back(tmp_path: Path) -> None:
     assert s.pair_count() == 0
 
 
+def test_state_file_is_owner_only(tmp_path: Path) -> None:
+    """It holds decrypted task content; outside Docker it was made with the default umask."""
+    new = tmp_path / "new.db"
+    State(new).close()
+    assert new.stat().st_mode & 0o777 == 0o600
+    older = tmp_path / "older.db"
+    State(older).close()
+    older.chmod(0o644)  # as made before this was enforced
+    State(older).close()
+    assert older.stat().st_mode & 0o777 == 0o600
+
+
 def test_file_lock_excludes(tmp_path: Path) -> None:
     lock = tmp_path / "l"
     with file_lock(lock, timeout=1), pytest.raises(TimeoutError), file_lock(lock, timeout=0.6):

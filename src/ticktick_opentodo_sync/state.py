@@ -5,6 +5,7 @@ Every write is its own short transaction, issued only when something changed.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import sqlite3
@@ -83,6 +84,11 @@ class State:
             self.db.executescript(
                 f"BEGIN;\n{_SCHEMA}\nPRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;"
             )
+        # It holds decrypted task content (the last-synced copies): owner-only, also for a
+        # file created before this was enforced. SQLite gives its journal the same mode.
+        with contextlib.suppress(OSError):  # someone else's file: left as it is
+            if self.path.stat().st_mode & 0o077:
+                self.path.chmod(0o600)
 
     def close(self) -> None:
         self.db.close()

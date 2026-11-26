@@ -19,18 +19,22 @@ concurrency:
 
 jobs:
   release:
+    # workflow_dispatch can be started on any branch: only main is ever released.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      # Pinned to a commit (a tag can be moved), and the token isn't left in .git/config:
+      # this job can write to the repository. To update: the v4 tag's commit in
+      # `git ls-remote --tags https://github.com/actions/checkout`.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          python-version: "3.13"
+          persist-credentials: false
 
+      # The runner's own Python (3.12) has tomllib: no setup-python action needed.
       - name: Read the version
         id: version
         run: |
-          python - <<'PY' >> "$GITHUB_OUTPUT"
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import re, sys, tomllib
           from pathlib import Path
 
@@ -47,9 +51,10 @@ jobs:
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+          if gh release view "$TAG" >/dev/null 2>&1 || gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
             echo "$TAG already exists; nothing to release."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
@@ -60,6 +65,7 @@ jobs:
         if: steps.check.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.version.outputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |

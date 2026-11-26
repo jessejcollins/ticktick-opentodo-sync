@@ -118,7 +118,8 @@ If you'd rather not run Docker, the sync is an ordinary Python package with two 
 git clone https://github.com/jessejcollins/ticktick-opentodo-sync.git
 cd ticktick-opentodo-sync
 python3 -m venv .venv
-.venv/bin/pip install .
+.venv/bin/pip install --require-hashes -r requirements.lock   # the exact, verified versions
+.venv/bin/pip install --no-deps --no-build-isolation .
 cp .env.example .env && chmod 600 .env
 $EDITOR .env
 ```
@@ -162,7 +163,7 @@ To keep it running, pick one:
 
   Then `sudo systemctl enable --now ticktick-opentodo-sync` and follow it with `journalctl -u ticktick-opentodo-sync -f`.
 
-Docker adds the resource limits and lockdown described in [Running next to Pi-hole](#running-next-to-pi-hole) and the `(healthy)`/`(unhealthy)` status. Without Docker, keep an eye on the log and exit codes instead. To update, `git pull` and run `.venv/bin/pip install .` again.
+Docker adds the resource limits and lockdown described in [Running next to Pi-hole](#running-next-to-pi-hole) and the `(healthy)`/`(unhealthy)` status. Without Docker, keep an eye on the log and exit codes instead. To update, `git pull` and run the two `pip install` lines again.
 
 ## Day to day
 
@@ -289,6 +290,20 @@ docker run --rm -v "$PWD":/w -w /w -e PYTHONPATH=/w/src ticktick-opentodo-sync:d
 ```
 
 Outside Docker (Python 3.11 or newer): `pip install -e '.[dev]'` in a virtualenv, then `pytest`, `ruff check src tests` and `mypy`. See [Running without Docker](#running-without-docker) for running the sync itself.
+
+### Updating dependencies
+
+The image installs its runtime dependencies, and the setuptools that builds the package, from `requirements.lock`. That file pins each exact version with the hashes of every file PyPI has for it (arm64 and amd64 alike), so a rebuild on the Pi can't pick up a release that changed or was tampered with. After changing `dependencies` in `pyproject.toml`, or to take new releases, regenerate it with pip-tools in a throwaway container. pip-tools doesn't become a project dependency.
+
+```sh
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/w -w /w python:3.13-slim-trixie sh -c \
+  "pip -q install --target /tmp/pt pip-tools 'setuptools>=77' && PYTHONPATH=/tmp/pt python -m piptools compile \
+   --upgrade --quiet --no-build-isolation --generate-hashes --allow-unsafe --strip-extras \
+   --build-deps-for wheel --output-file requirements.lock pyproject.toml"
+docker build --target test .
+```
+
+Without `--upgrade` it keeps the current pins and only adds what `pyproject.toml` newly asks for. The build's `pip check` fails if the lock is missing a dependency `pyproject.toml` names.
 
 ### Code map
 

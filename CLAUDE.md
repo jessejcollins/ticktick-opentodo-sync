@@ -20,6 +20,9 @@ The same tasks show up in both apps, so someone can keep using TickTick day to d
 
 - **Be a good neighbour on a shared host.** The compose service runs as a non-root UID, with `mem_limit: 128m`, `cpus: 0.25`, `read_only: true`, `cap_drop: [ALL]`, `security_opt: [no-new-privileges:true]`, a tmpfs for `/tmp` and `/run/ticktick-opentodo-sync`, and the `/data` state volume as its only writable path. No published ports, no host networking.
 - **Few dependencies.** The standard library plus `httpx` (HTTP) and `cryptography` (OpenTodo E2EE). Stdlib `sqlite3` for state. No ORMs or frameworks. Ask the maintainer before adding a dependency.
+  - The image installs them, and the setuptools that builds the package, from `requirements.lock`: hash-pinned, wheels only.
+  - Regenerate the lock with the README's "Updating dependencies" command whenever `dependencies` changes.
+  - The GitHub Action in the release workflow is pinned to a commit.
 - **Secrets stay out of git.** Config comes from `.env` (gitignored) next to `compose.yaml`, loaded with `env_file:`. `.env.example` documents every setting. Never print secret values in logs or output.
 - **Go easy on the SD card.** Write state only when something changed, in a single SQLite file. The per-pass heartbeat goes to tmpfs. Docker logs use `json-file` with small rotation.
 - **Never delete in bulk by accident.** If a pass would delete or complete more than N tasks (configurable, default 10), it stops, logs a warning and records the block. In one-shot mode it exits non-zero. In loop mode the container keeps running and reports unhealthy until a run with `--allow-bulk` clears the block.
@@ -72,6 +75,7 @@ ticktick-opentodo-sync/
   LICENSE                  # MIT
   .github/workflows/release.yml  # tag + GitHub release when a version bump lands on main
   Dockerfile               # stages: build, dev, test (ruff+mypy+pytest), runtime
+  requirements.lock        # runtime deps + build backend, hash-pinned (README: Updating dependencies)
   compose.yaml
   pyproject.toml
   .env.example

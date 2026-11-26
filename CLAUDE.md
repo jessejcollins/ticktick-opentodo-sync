@@ -27,7 +27,7 @@ The same tasks show up in both apps, so someone can keep using TickTick day to d
 - **Go easy on the SD card.** Write state only when something changed, in a single SQLite file. The per-pass heartbeat goes to tmpfs. Docker logs use `json-file` with small rotation.
 - **Never delete in bulk by accident.** If a pass would delete or complete more than N tasks (configurable, default 10), it stops, logs a warning and records the block. In one-shot mode it exits non-zero. In loop mode the container keeps running and reports unhealthy until a run with `--allow-bulk` clears the block.
   - The same applies across passes: deletions over any 24 hours are capped too (`MAX_DELETES_PER_DAY`, default 50; `--allow-bulk` deletions don't count), so a fault that deletes a few tasks every pass is caught as well.
-  - The habit guard (check-ins cleared in TickTick) blocks the same way.
+  - The habit guard (check-ins cleared, in either app) blocks the same way.
 - **Code style:** idiomatic, fully typed Python; `ruff` and `mypy --strict` clean.
 
 ## Sync rules
@@ -167,7 +167,7 @@ Settled answers from the build. Dates are when they were decided or learned.
   - Pairing by name (2026-11-25). After a state reset every habit is unpaired; copying them doubled each one on both sides, and TickTick habits can't be deleted through the API. The old "Habits" project, unknown without its meta, became a TickTick list.
     - Unpaired habits with the same name on both sides are paired instead (`match_habits`, TickTick wins). A name on both sides that isn't unique on one is left alone with a warning.
     - Without `ot_habits_project`, a live project named "Habits" that holds open habits is taken as the habits project again. Collect therefore fetches OpenTodo's tasks before reconciling projects.
-  - Not synced: archiving/graduating and deleting (TickTick's API can't delete a habit), amount habits and targets ("3 times a week"); they're left alone with a warning. TickTick clearing more check-ins than the bulk limit stops the habit pass.
+  - Not synced: archiving/graduating and deleting (TickTick's API can't delete a habit), amount habits and targets ("3 times a week"); they're left alone with a warning. Clearing more check-ins than the bulk limit, in either app, blocks the habit pass. OpenTodo's side counts too: one empty check-in answer from TickTick read as every synced day un-checked (2026-11-25).
 - **Not possible with TickTick's Open API (checked 2026-11-24):**
   - **Filters ↔ Views:** the Open API has no saved-filter endpoints (only an ad-hoc `/task/filter` query). OpenTodo Views (`/api/v1/views`) would be easy; TickTick is the blocker.
   - **Attachments:** TickTick keeps them as `![file](<id>/<name>)` references in the notes, which already sync as text. The Open API has no attachment routes, and the web app's `/api/v1/attachment/...` answers 401 to the API token. It needs a username/password session, which goes against the token-only decision.

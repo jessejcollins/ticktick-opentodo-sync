@@ -198,12 +198,17 @@ class HabitSync:
         base = st.habit_days(self.state)
         refused = self._refused(day_pairs, tt_done, ot_done, dry_run=dry_run)
         actions = plan_days(day_pairs, days, tt_done, ot_done, base, refused=refused)
-        clears = sum(a.kind is DKind.CLEAR_TT for a in actions)
+        # Both directions count: one empty check-in answer from TickTick reads as every
+        # synced day un-checked there, and would clear them all in OpenTodo.
+        clears_tt = sum(a.kind is DKind.CLEAR_TT for a in actions)
+        clears_ot = sum(a.kind is DKind.CLEAR_OT for a in actions)
+        clears = clears_tt + clears_ot
         if clears > self.max_destructive and not allow_bulk:
             # Blocked like the task guards (BLOCKED in the summary, --status and health),
             # rather than counted as an error.
             res.blocked = (
-                f"habits: {clears} check-ins would be cleared in TickTick, more than "
+                f"habits: {clears} check-ins would be cleared ({clears_tt} in TickTick, "
+                f"{clears_ot} in OpenTodo), more than "
                 f"TICKTICK_OPENTODO_SYNC_MAX_DESTRUCTIVE={self.max_destructive}; none written. "
                 "Review, then run once with --allow-bulk."
             )

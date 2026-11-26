@@ -418,6 +418,23 @@ def test_clearing_many_check_ins_blocks_the_pass(env: Env) -> None:
     assert len(env.tt_days(hid)) == 12  # none cleared in TickTick
 
 
+def test_an_empty_check_in_answer_clears_nothing(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One empty answer from TickTick read as every synced day un-checked there, and cleared
+    them all in OpenTodo: only TickTick-side clears were guarded."""
+    hid = env.tt.add_habit("Read")
+    for stamp in range(20261110, 20261122):  # 12 days
+        env.tt.checkins[(hid, stamp)] = 2
+    env.run()
+    habit = env.ot_habit("Read")
+    with monkeypatch.context() as m:
+        m.setattr(env.tt, "habit_checkins", lambda *_: [])
+        res = Syncer(env.tt, env.ot, env.state, now_ms=lambda: NOW).run(dry_run=False)
+    assert res.blocked and "12 check-ins" in res.blocked and "12 in OpenTodo" in res.blocked
+    assert len(env.ot_days(habit)) == 12
+    env.quiet()  # the next answer is whole again: nothing to do, and the block lifts
+    assert env.state.get_meta_json("blocked") is None
+
+
 def test_unwritable_state_creates_no_habit(env: Env) -> None:
     """A habit created without its pair recorded would be created again every pass, and
     TickTick habits can't be deleted through the API."""

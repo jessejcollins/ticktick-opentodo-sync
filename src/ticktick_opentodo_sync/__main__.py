@@ -138,6 +138,7 @@ def _build(cfg: Config) -> tuple[Syncer, State, list[Http]]:
         max_destructive=cfg.max_destructive,
         max_deletes_per_day=cfg.max_deletes_per_day,
         max_creates=cfg.max_creates,
+        max_updates=cfg.max_updates,
     )
     return syncer, state, [tt_http, ot_http]
 

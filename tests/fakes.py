@@ -211,6 +211,8 @@ class FakeOpenTodo:
         self.refuse_occurrences = False
         self.today: str | None = None
         """Set by habit tests: OpenTodo's idea of today, for log_habit."""
+        self.unlisted: set[str] = set()
+        """Project ids an incomplete listing leaves out (a GET still finds them)."""
 
     def add_project(self, name: str, *, archived: bool = False) -> str:
         pid = _id("otp")
@@ -246,7 +248,11 @@ class FakeOpenTodo:
         pass
 
     def projects(self) -> list[JSON]:
-        return [copy.deepcopy(p) for p in self.projects_.values()]
+        return [copy.deepcopy(p) for p in self.projects_.values() if p["id"] not in self.unlisted]
+
+    def project(self, project_id: str) -> JSON | None:
+        p = self.projects_.get(project_id)
+        return copy.deepcopy(p) if p else None
 
     def create_project(self, name: str) -> JSON:
         self.writes.append(("create_project", name))
@@ -275,6 +281,11 @@ class FakeOpenTodo:
         lid = _id("otl")
         self.labels_[lid] = {"id": lid, "name": name, "deleted_at": None}
         return copy.deepcopy(self.labels_[lid])
+
+    def rename_label(self, label_id: str, name: str) -> JSON:
+        self.writes.append(("rename_label", name))
+        self.labels_[label_id]["name"] = name
+        return copy.deepcopy(self.labels_[label_id])
 
     def tasks(self) -> list[JSON]:
         return [copy.deepcopy(t) for t in self.tasks_.values()]

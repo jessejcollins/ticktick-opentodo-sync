@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -10,9 +12,10 @@ from typing import Any
 import pytest
 from fakes import FakeOpenTodo, FakeTickTick, deny_writes
 
+from ticktick_opentodo_sync.http import ApiError
 from ticktick_opentodo_sync.opentodo import PLACEHOLDER
 from ticktick_opentodo_sync.state import State
-from ticktick_opentodo_sync.sync import PassResult, Syncer, deletes_in_last_day
+from ticktick_opentodo_sync.sync import CREATED_LABELS, PassResult, Syncer, deletes_in_last_day
 
 NY = "America/New_York"
 
@@ -102,6 +105,28 @@ def test_placeholder_project_name_is_repaired(env: Env) -> None:
     env.assert_quiet()
 
 
+def test_placeholder_label_name_is_repaired(env: Env) -> None:
+    """Its tasks were skipped for good: labels had no repair (review #28)."""
+    _, report = seed(env)  # "Report" carries the new label "office"
+    (lid,) = env.ot.labels_
+    assert env.state.get_meta_json(CREATED_LABELS) == {lid: "office"}
+    env.ot.labels_[lid]["name"] = PLACEHOLDER  # a browser saved the placeholder back
+    env.tt.tasks[report]["title"] = "Q3 report"
+    res = env.run()
+    assert res.ok and res.ot.updated == 1, res.summary()
+    assert env.ot.labels_[lid]["name"] == "office"
+    assert env.ot_by_title("Q3 report")["labels"] == [lid]
+    assert env.state.get_meta_json(CREATED_LABELS) is None
+    env.assert_quiet()
+
+
+def test_created_labels_are_forgotten_once_seen(env: Env) -> None:
+    seed(env)
+    assert env.state.get_meta_json(CREATED_LABELS)
+    env.run()
+    assert env.state.get_meta_json(CREATED_LABELS) is None
+
+
 def test_dry_run_writes_nothing(env: Env) -> None:
     env.tt.add_task("x", env.tt.add_project("Work"))
     res = env.run(dry_run=True)
@@ -155,6 +180,87 @@ def test_list_deleted_in_ticktick_archives_its_project(env: Env) -> None:
     env.assert_quiet()
 
 
+def test_failed_archive_lets_the_pass_finish(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """It raised out of the pass: deletions went unrecorded, habits were skipped (review #24)."""
+    otp = _delete_list(env, 2)
+    env.tt.add_habit("Stretch")
+
+    def refuse(project_id: str) -> dict[str, Any]:
+        raise ApiError("OpenTodo", "PATCH", f"/api/v1/projects/{project_id}", 502, "bad gateway")
+
+    monkeypatch.setattr(env.ot, "archive_project", refuse)
+    res = env.run()
+    assert res.errors == 1 and res.ot.deleted == 2 and res.habits_ot.created == 1, res.summary()
+    assert deletes_in_last_day(env.state, int(time.time() * 1000)) == 2
+    assert env.state.get_meta_json("last_change")["errors"] == 1
+    assert not env.ot.projects_[otp]["archived"] and env.state.project_pairs()
+    monkeypatch.undo()
+    res = env.run()  # tried again
+    assert res.ok and env.ot.projects_[otp]["archived"] and not env.state.project_pairs()
+    env.assert_quiet()
+
+
+def _work_and_home(env: Env) -> tuple[str, str, str]:
+    """Lists Work (deleted in TickTick, with its task) and Home (task "Keep") after a sync:
+    (Keep's TickTick id, Work's and Home's OpenTodo projects)."""
+    home = env.tt.add_project("Home")
+    keep = env.tt.add_task("Keep", home)
+    _delete_list(env, 1)
+    by_name = {p["name"]: p["id"] for p in env.ot.projects_.values()}
+    return keep, by_name["Work"], by_name["Home"]
+
+
+def test_move_into_a_retiring_project_is_moved_back(env: Env) -> None:
+    """It was pushed to TickTick, where the list is gone: an error every pass, and the
+    project never archived (review #25). TickTick wins: OpenTodo is moved back."""
+    keep, work, home = _work_and_home(env)
+    env.ot_by_title("Keep")["project_id"] = work  # moved in OpenTodo, before the archive
+    res = env.run()
+    assert res.ok and res.ot.deleted == 1 and res.conflicts == 1, res.summary()
+    assert env.ot_by_title("Keep")["project_id"] == home
+    assert env.tt.tasks[keep]["projectId"] in env.tt.projects_
+    assert env.ot.projects_[work]["archived"] is True
+    env.assert_quiet()
+
+
+def test_unrelated_error_doesnt_hold_up_the_archive(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any error in the pass deferred it; only its own tasks' failures should (review #25)."""
+    _, work, _ = _work_and_home(env)
+    env.ot_by_title("Keep")["title"] = "Keep it"  # an edit whose TickTick write fails
+
+    def refuse(task_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        raise ApiError("TickTick", "POST", f"/open/v1/task/{task_id}", 500, "boom")
+
+    monkeypatch.setattr(env.tt, "update_task", refuse)
+    res = env.run()
+    assert res.errors == 1 and env.ot.projects_[work]["archived"] is True, res.summary()
+
+
+def test_failure_in_a_retiring_project_holds_up_its_archive(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its tasks must go through the delete rules first: archived, they'd be out of scope."""
+    work = _delete_list(env, 2)
+    delete_task = env.ot.delete_task
+    calls: list[str] = []
+
+    def fail_once(task_id: str) -> None:
+        calls.append(task_id)
+        if len(calls) == 1:
+            raise ApiError("OpenTodo", "DELETE", f"/api/v1/tasks/{task_id}", 500, "boom")
+        delete_task(task_id)
+
+    monkeypatch.setattr(env.ot, "delete_task", fail_once)
+    res = env.run()
+    assert res.errors == 1 and res.ot.deleted == 1, res.summary()
+    assert env.ot.projects_[work]["archived"] is False
+    res = env.run()
+    assert res.ok and res.ot.deleted == 1 and env.ot.projects_[work]["archived"] is True
+    env.assert_quiet()
+
+
 def test_blocked_pass_writes_no_list_or_project_either(env: Env) -> None:
     """Lists and projects were created while collecting, before the guards ran."""
     otp = _delete_list(env, 12)
@@ -190,6 +296,55 @@ def test_project_purged_in_opentodo_is_recreated(env: Env) -> None:
     assert res.ok and res.tt.deleted == 1, res.summary()
     assert [p["name"] for p in env.ot.projects_.values()] == ["Work"]
     assert [p["name"] for p in env.tt.projects_.values()] == ["Work"]
+    env.assert_quiet()
+
+
+def test_list_missing_from_one_listing_is_not_archived(env: Env) -> None:
+    """Its project was archived, and the list's tasks stopped syncing for good (review #23)."""
+    work = env.tt.add_project("Work")
+    tid = env.tt.add_task("Draft memo", work)
+    env.run()
+    (otp,) = env.ot.projects_
+    hidden = env.tt.projects_.pop(work)  # one listing comes back without it
+    res = env.run()
+    assert res.ok and not env.ot.projects_[otp]["archived"], res.summary()
+    assert env.state.project_pairs() == {work: otp}
+    env.tt.projects_[work] = hidden
+    env.tt.tasks[tid]["title"] = "Final memo"
+    res = env.run()
+    assert res.ok and res.ot.updated == 1, res.summary()
+    assert [p["name"] for p in env.ot.projects_.values()] == ["Work"]
+    assert env.ot_by_title("Final memo")["project_id"] == otp
+    env.assert_quiet()
+
+
+def test_project_missing_from_one_listing_is_kept(env: Env) -> None:
+    """It became a new project, then a second TickTick list taking the tasks (review #23)."""
+    work = env.tt.add_project("Work")
+    tid = env.tt.add_task("Draft memo", work)
+    env.run()
+    (otp,) = env.ot.projects_
+    env.ot.unlisted.add(otp)  # one listing leaves it out; it still exists
+    res = env.run()
+    assert res.ok and not any(w[0] == "create_project" for w in env.ot.writes[1:]), res.summary()
+    env.ot.unlisted.clear()
+    env.run()
+    assert list(env.ot.projects_) == [otp] and list(env.tt.projects_) == [work]
+    assert env.tt.tasks[tid]["projectId"] == work
+    assert env.state.project_pairs() == {work: otp}
+    env.assert_quiet()
+
+
+def test_trashed_project_left_out_of_the_listing_is_restored(env: Env) -> None:
+    """Whether OpenTodo lists trashed projects is unverified: a GET finds them either way."""
+    seed(env)
+    otp = next(iter(env.ot.projects_))
+    env.ot.projects_[otp]["deleted_at"] = 1
+    env.ot.unlisted.add(otp)
+    res = env.run()
+    assert res.ok and env.ot.projects_[otp]["deleted_at"] is None, res.summary()
+    assert len(env.ot.projects_) == 1 and not res.tt.deleted
+    env.ot.unlisted.clear()
     env.assert_quiet()
 
 
@@ -441,6 +596,39 @@ def test_deletions_over_a_day_are_capped(env: Env) -> None:
     assert run().ot.deleted == 2
 
 
+def test_daily_cap_holds_until_allow_bulk(env: Env) -> None:
+    """What it blocked went through unreviewed once the window rolled over (review #29)."""
+    clock = [1_800_000_000_000]
+
+    def run(**kw: Any) -> PassResult:
+        syncer = Syncer(env.tt, env.ot, env.state, max_deletes_per_day=3, now_ms=lambda: clock[0])
+        return syncer.run(dry_run=False, **kw)
+
+    work = env.tt.add_project("Work")
+    tids = [env.tt.add_task(f"t{i}", work) for i in range(8)]
+    run()
+    for tid in tids[:3]:
+        del env.tt.tasks[tid]
+    assert run().ot.deleted == 3  # the day's budget
+    gone = {tid: env.tt.tasks.pop(tid) for tid in tids[3:5]}  # a fault keeps "deleting"
+    assert run().blocked
+    tripped = env.state.get_meta_json("blocked")["at"]
+    clock[0] += 25 * 60 * 60 * 1000  # the window rolls over
+    res = run()
+    assert res.blocked and not res.ot.deleted, res.summary()
+    assert env.state.get_meta_json("blocked")["at"] == tripped  # since when, kept
+    env.tt.tasks.update(gone)  # the fault goes away: nothing to delete, the block lifts
+    assert run().ok and env.state.get_meta_json("blocked") is None
+    for tid in tids[3:7]:  # 4 > 3 (the first 3 are a day old): it trips again
+        del env.tt.tasks[tid]
+    assert run().blocked
+    clock[0] += 25 * 60 * 60 * 1000
+    assert run().blocked
+    assert run(allow_bulk=True).ot.deleted == 4  # --allow-bulk lifts it
+    del env.tt.tasks[tids[7]]
+    assert run().ot.deleted == 1  # back to the plain daily budget
+
+
 def test_many_new_tasks_at_once_block(env: Env) -> None:
     """Restoring an older state backup unpairs every task made since: each would be duplicated
     in both apps in one pass (review #22)."""
@@ -458,6 +646,29 @@ def test_many_new_tasks_at_once_block(env: Env) -> None:
     assert res.blocked and "MAX_CREATES" in res.blocked
     assert len(env.ot.writes) == writes
     assert run(allow_bulk=True).ot.created == 4
+    env.assert_quiet()
+
+
+def test_many_ticktick_overwrites_at_once_block(env: Env) -> None:
+    """Every OpenTodo copy reading as edited went straight into TickTick: 2026-11-21's 66
+    tasks overwritten with ciphertext (review #30)."""
+
+    def run(**kw: Any) -> PassResult:
+        return Syncer(env.tt, env.ot, env.state, max_updates=3).run(dry_run=False, **kw)
+
+    tids = [env.tt.add_task(f"task {i}", content=f"notes {i}") for i in range(5)]
+    run()
+    for tid in tids:  # bulk edits made in TickTick go to OpenTodo: not capped
+        env.tt.tasks[tid]["priority"] = 5
+    assert run().ot.updated == 5
+    for t in env.ot.tasks_.values():  # e.g. a changed notes format read back from OpenTodo
+        t["description"] = "<p></p>"
+    writes = len(env.tt.writes)
+    res = run()
+    assert res.blocked and "MAX_UPDATES" in res.blocked, res.summary()
+    assert len(env.tt.writes) == writes
+    assert all(env.tt.tasks[t]["content"].startswith("notes") for t in tids)
+    assert run(allow_bulk=True).tt.updated == 5
     env.assert_quiet()
 
 
@@ -707,6 +918,79 @@ def test_whole_task_write_keeps_a_tick_made_during_the_pass(
     env.assert_quiet()
 
 
+def test_item_status_left_out_by_one_endpoint_isnt_a_change(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unchecked item without ``status`` read as changed: deferred every pass (review #31)."""
+    tid = _checklist(env)
+    get_task = FakeTickTick.get_task
+
+    def without_default_status(self: FakeTickTick, project_id: str, task_id: str) -> Any:
+        raw = get_task(self, project_id, task_id)
+        if raw and raw.get("items"):
+            raw["items"] = [
+                {k: v for k, v in i.items() if not (k == "status" and v == 0)} for i in raw["items"]
+            ]
+        return raw
+
+    monkeypatch.setattr(FakeTickTick, "get_task", without_default_status)
+    env.ot_by_title("Pack")["priority"] = 1  # edited in OpenTodo
+    res = env.run()
+    assert res.ok and res.tt.updated == 1, res.summary()
+    assert env.tt.tasks[tid]["priority"] == 5
+
+
+def test_a_write_deferred_every_pass_becomes_an_error(
+    env: Env, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Deferred forever at INFO, with health green: the write never happened (review #31)."""
+    _, report = seed(env)
+    get_task = FakeTickTick.get_task
+
+    def disagrees(self: FakeTickTick, project_id: str, task_id: str) -> Any:
+        raw = get_task(self, project_id, task_id)
+        return raw and raw | {"title": raw["title"] + "!"}  # never as the listing says
+
+    monkeypatch.setattr(FakeTickTick, "get_task", disagrees)
+    env.ot_by_title("Report")["priority"] = 3  # edited in OpenTodo
+    assert env.run().ok and env.run().ok  # could be edits in TickTick meanwhile
+    assert env.state.get_meta_json("deferred") == {report: 2}
+    with caplog.at_level(logging.WARNING):
+        res = env.run()
+    assert res.errors == 1 and not res.tt.updated, res.summary()
+    assert "3 times in a row" in caplog.text and "title" in caplog.text
+    monkeypatch.undo()
+    res = env.run()
+    assert res.ok and res.tt.updated == 1, res.summary()
+    assert env.state.get_meta_json("deferred") is None
+    env.assert_quiet()
+
+
+def test_item_write_keeps_a_tick_made_during_the_pass(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The item's planned state was written over a tick made meanwhile (review #32)."""
+    tid = _checklist(env)
+    subtasks(env, "Pack")["Socks"]["title"] = "Wool socks"  # renamed in OpenTodo
+    tt_items(env, tid)["Shirts"]["title"] = "Tees"  # an item that didn't change meanwhile
+    check_writable = State.check_writable
+
+    def ticked_meanwhile(state: State) -> None:
+        tt_items(env, tid)["Socks"]["status"] = 1  # ticked in TickTick during the pass
+        check_writable(state)
+
+    monkeypatch.setattr(State, "check_writable", ticked_meanwhile)
+    res = env.run()
+    monkeypatch.undo()
+    assert res.ok and res.ot_items.updated == 1 and not res.tt_items.updated, res.summary()
+    assert tt_items(env, tid)["Socks"]["status"] == 1  # kept
+    res = env.run()  # both changed: TickTick wins, tick included
+    assert res.ok and res.conflicts == 1, res.summary()
+    assert tt_items(env, tid)["Socks"]["status"] == 1
+    assert subtasks(env, "Pack")["Socks"]["completed_at"] is not None
+    env.assert_quiet()
+
+
 def test_checklist_items_become_subtasks(env: Env) -> None:
     _checklist(env)
     subs = subtasks(env, "Pack")
@@ -778,6 +1062,51 @@ def test_ticktick_subtask_goes_to_opentodo(env: Env) -> None:
     res = env.run()
     assert res.ot.created == 2, res.summary()
     assert env.ot_by_title("Book hotel")["parent_id"] == env.ot_by_title("Plan trip")["id"]
+    env.assert_quiet()
+
+
+def _trip(env: Env) -> tuple[str, str]:
+    parent = env.tt.add_task("Plan trip")
+    child = env.tt.add_task("Book hotel", parentId=parent)
+    assert env.run().ot.created == 2
+    return parent, child
+
+
+def test_subtask_completed_after_its_parent(env: Env) -> None:
+    """It stayed open in OpenTodo for good: out of scope once the parent was (review #27)."""
+    parent, child = _trip(env)
+    env.tt.tasks[parent]["status"] = 2
+    env.run()
+    env.tt.tasks[child]["status"] = 2
+    res = env.run()
+    assert res.ok and res.ot.completed == 1, res.summary()
+    assert env.ot_by_title("Book hotel")["completed_at"] is not None
+    env.assert_quiet()
+
+
+def test_subtask_completed_with_its_parent_whatever_the_row_order(env: Env) -> None:
+    """With the child's pair row first, the parent wasn't resolved yet (review #27)."""
+    parent, child = _trip(env)
+    env.state.put_pair(next(p for p in env.state.pairs() if p.tt_id == parent))  # row last
+    assert [p.tt_id for p in env.state.pairs()] == [child, parent]
+    env.tt.tasks[parent]["status"] = 2
+    env.tt.tasks[child]["status"] = 2
+    res = env.run()
+    assert res.ok and res.ot.completed == 2, res.summary()
+    env.assert_quiet()
+
+
+def test_subtask_of_a_completed_parent_completed_in_opentodo(env: Env) -> None:
+    parent, child = _trip(env)
+    env.tt.tasks[parent]["status"] = 2
+    env.run()
+    env.ot_by_title("Book hotel")["completed_at"] = 1
+    res = env.run()
+    assert res.ok and res.tt.completed == 1, res.summary()
+    assert env.tt.tasks[child]["status"] == 2
+    # A new subtask made in OpenTodo under the completed parent still isn't copied.
+    env.ot.add_task("Pack", None, parent_id=env.ot_by_title("Plan trip")["id"])
+    assert not env.run().tt.created
     env.assert_quiet()
 
 

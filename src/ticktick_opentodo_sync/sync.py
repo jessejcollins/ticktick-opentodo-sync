@@ -35,6 +35,11 @@ from .state import ITEMS, State
 
 log = logging.getLogger(__name__)
 
+CREATED_LABELS = "ot_labels_created"
+"""Meta key: ``{label id: name}`` of OpenTodo labels this sync created and hasn't seen
+since. A browser can save the create placeholder over a new label's name; this is the name
+to put back."""
+
 
 class TickTickApi(Protocol):
     def preference_timezone(self) -> str | None: ...
@@ -63,12 +68,14 @@ class TickTickApi(Protocol):
 class OpenTodoApi(Protocol):
     def begin_pass(self) -> None: ...
     def projects(self) -> list[JSON]: ...
+    def project(self, project_id: str) -> JSON | None: ...
     def create_project(self, name: str) -> JSON: ...
     def rename_project(self, project_id: str, name: str) -> JSON: ...
     def archive_project(self, project_id: str) -> JSON: ...
     def restore_project(self, project_id: str) -> JSON: ...
     def labels(self) -> list[JSON]: ...
     def create_label(self, name: str) -> JSON: ...
+    def rename_label(self, label_id: str, name: str) -> JSON: ...
     def tasks(self) -> list[JSON]: ...
     def create_task(self, body: JSON, *, idempotency_key: str) -> JSON: ...
     def update_task(self, task_id: str, body: JSON) -> JSON: ...
@@ -166,11 +173,22 @@ class World:
     ot_project_ids: set[str] = field(default_factory=set)
     projects: ProjectPlan = field(default_factory=ProjectPlan)
     """List/project changes: planned by :meth:`Syncer.collect`, applied after the guards."""
+    label_renames: list[tuple[str, str]] = field(default_factory=list)
+    """(OpenTodo label id, name) of labels this sync created that hold the placeholder."""
     project_renames: list[tuple[str, str]] = field(default_factory=list)
     """(OpenTodo project id, name) of paired projects holding the create placeholder."""
     retiring: set[str] = field(default_factory=set)
     """Project keys of OpenTodo projects whose TickTick list was deleted: only their paired
     tasks are in scope (for the delete rules); new ones are never copied to TickTick."""
+    failed_ot: set[str] = field(default_factory=set)
+    """OpenTodo ids of tasks whose action failed this pass (their project isn't archived)."""
+    tt_waiting: set[str] = field(default_factory=set)
+    """TickTick subtasks out of scope only because their parent isn't open: see
+    :meth:`Syncer._adopt_children`."""
+    deferred: dict[str, int] = field(default_factory=dict)
+    """TickTick id -> passes in a row its write has been deferred, this one included."""
+    tt_lists_alive: set[str] = field(default_factory=set)
+    """TickTick lists a looked-up task was found in: they exist, listed or not."""
     ot_tasks_read: int = 0
 
 
@@ -193,6 +211,7 @@ class Syncer:
         max_destructive: int = 10,
         max_deletes_per_day: int = 50,
         max_creates: int = 50,
+        max_updates: int = 50,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
         self.tt = tt
@@ -202,8 +221,11 @@ class Syncer:
         self.max_destructive = max_destructive
         self.max_deletes_per_day = max_deletes_per_day
         self.max_creates = max_creates
+        self.max_updates = max_updates
         self.now_ms = now_ms
         self.run_id = str(now_ms())
+        self._deferrals: dict[str, int] = {}
+        """TickTick id -> passes in a row its write was deferred, as of the last pass."""
         self._habit_notes: set[str] = set()
         """The habit sync's once-per-process warnings: it's rebuilt every pass, this isn't."""
 
@@ -224,7 +246,7 @@ class Syncer:
         ot_project_ids: set[str] = set()
         trashed: set[str] = set()
         renames: list[tuple[str, str]] = []
-        ot_project_list = self.ot.projects()
+        ot_project_list = self._with_unlisted_projects(self.ot.projects())
         ot_task_list = self.ot.tasks()  # before reconciling projects: see _find_habits_project
         habits_project = self.state.get_meta(META_PROJECT) or self._find_habits_project(
             ot_project_list, ot_task_list, dry_run=dry_run
@@ -296,9 +318,50 @@ class Syncer:
         self._collect_tt(world, [pid for pid in tt_projects if pid in in_scope], in_scope, dry_run)
         children = self._collect_ot(world, in_scope, ot_task_list)
         self._resolve_missing_tt(world, in_scope)
+        self._adopt_children(world, in_scope)
         self._refresh_tt_projects(world, dry_run=dry_run)
         self._collect_subtasks(world, children, in_scope)
+        self._hold_retiring(world)
         return world
+
+    def _with_unlisted_projects(self, listed: list[JSON]) -> list[JSON]:
+        """OpenTodo's project listing, plus paired projects it left out that still exist.
+
+        A paired project missing from one listing read as purged: the pair was dropped and
+        the list got a new project, and once the old one was listed again it became a
+        second TickTick list, taking the original list's tasks with it. So each one is
+        looked up: a 404 means gone; a project that answers (trashed or not) is used.
+        """
+        listed_ids = {str(p.get("id")) for p in listed}
+        out = list(listed)
+        for pid in sorted(set(self.state.project_pairs().values()) - listed_ids):
+            found = self.ot.project(pid)
+            if found is not None:
+                log.warning(
+                    "OpenTodo project %s is missing from the project listing but still exists; "
+                    "using it",
+                    pid,
+                )
+                out.append(found)
+        return out
+
+    def _hold_retiring(self, w: World) -> None:
+        """Archive a project only once its TickTick list is really gone.
+
+        A list missing from one listing read as deleted: its project was archived, and the
+        list's tasks, still paired with copies in the archived project, stopped syncing for
+        good. A task of that list found alive under it (see :meth:`_resolve_missing_tt`)
+        proves the list still exists, so its project is kept this pass.
+        """
+        held = [r for r in w.projects.retire if r[0] in w.tt_lists_alive]
+        for tt_id, ot_id in held:
+            log.warning(
+                "TickTick list %s is missing from the list listing but its tasks are still in "
+                "it; not archiving OpenTodo project %r",
+                tt_id,
+                w.project_names.get(PENDING_PREFIX + ot_id, ot_id),
+            )
+        w.projects.retire = [r for r in w.projects.retire if r not in held]
 
     def _refresh_tt_projects(self, w: World, *, dry_run: bool) -> None:
         """Keep each pair's TickTick list id on the list the task was last seen in.
@@ -324,8 +387,11 @@ class Syncer:
         """The habit sync's OpenTodo project when its id isn't in the state (after a reset).
 
         Without it, the old "Habits" project read as an ordinary project and was turned into
-        a TickTick list. Taken back: a live project named "Habits" that holds open habits.
+        a TickTick list. Taken back: a live project named "Habits" that holds open habits,
+        and isn't paired with a TickTick list: that one is the list's (a list called "Habits"
+        with a habit made in its project), and taking it froze the list's tasks.
         """
+        paired = set(self.state.project_pairs().values())
         holding = {
             str(t["project_id"])
             for t in tasks
@@ -338,6 +404,7 @@ class Syncer:
             pid = str(p.get("id") or "")
             if (
                 pid in holding
+                and pid not in paired
                 and p.get("deleted_at") is None
                 and str(p.get("name") or "").strip().casefold() == HABITS_PROJECT.casefold()
             ):
@@ -359,6 +426,7 @@ class Syncer:
         them only in a fresh collect. Archiving waits for the end of the pass
         (:meth:`_retire_projects`).
         """
+        self._repair_labels(w, dry_run=dry_run)
         plan, verb = w.projects, "would " if dry_run else ""
         remote = bool(w.project_renames or plan.restore or plan.create_in_ot or plan.create_in_tt)
         if remote and not dry_run:
@@ -401,28 +469,63 @@ class Syncer:
                 log.info("would archive OpenTodo project %r: its TickTick list was deleted", name)
         return remote and not dry_run
 
+    def _repair_labels(self, w: World, *, dry_run: bool) -> None:
+        """Rename the labels that hold the placeholder back; forget the other created ones.
+
+        The placeholder race happens within a second of the create, so a label seen once
+        with its name needs no remembering. One that can't be renamed is tried next pass.
+        """
+        pending: dict[str, str] = {}
+        for lid, name in w.label_renames:
+            log.info(
+                "%srename OpenTodo label %s back to %r (it held the create placeholder)",
+                "would " if dry_run else "",
+                lid,
+                name,
+            )
+            if dry_run:
+                continue
+            try:
+                self.ot.rename_label(lid, name)
+            except Exception as exc:
+                log.warning("could not rename OpenTodo label %s back: %s", lid, exc)
+                pending[lid] = name
+        if not dry_run:
+            self.state.set_meta_json(CREATED_LABELS, pending or None)
+
     def _retire_projects(self, w: World, res: PassResult) -> None:
         """Archive the OpenTodo projects whose TickTick list was deleted; forget the pairs.
 
-        Only after a pass without errors: their paired tasks must have gone through the
-        delete rules first, as an archived project's tasks are out of scope for good.
+        Its paired tasks must have gone through the delete rules first, as an archived
+        project's tasks are out of scope for good: a project waits while one of them failed
+        this pass. Errors elsewhere don't hold it up (they used to, indefinitely).
         """
         if not w.projects.retire:
             return
-        if res.errors:
-            log.warning(
-                "archiving the OpenTodo project(s) of deleted TickTick lists waits for a pass "
-                "without errors"
-            )
-            return
         self.state.check_writable()
         for tt_id, ot_id in w.projects.retire:
-            self.ot.archive_project(ot_id)
-            self.state.drop_project_pair(tt_id)
-            log.info(
-                "archived OpenTodo project %r: its TickTick list was deleted",
-                w.project_names.get(PENDING_PREFIX + ot_id, ot_id),
+            name = w.project_names.get(PENDING_PREFIX + ot_id, ot_id)
+            failed = sum(
+                (w.ot_raw.get(oid) or {}).get("project_id") == ot_id for oid in w.failed_ot
             )
+            if failed:
+                log.warning(
+                    "archiving OpenTodo project %r waits: %d of its tasks failed this pass",
+                    name,
+                    failed,
+                )
+                continue
+            try:
+                self.ot.archive_project(ot_id)
+            except Exception as exc:
+                # Counted, and tried again next pass. Raising skipped the rest of the pass:
+                # its deletions went unrecorded (daily budget) and habits didn't sync.
+                res.errors += 1
+                log.error("failed to archive OpenTodo project %r: %s", name, exc)  # noqa: TRY400
+                log.debug("traceback", exc_info=True)
+                continue
+            self.state.drop_project_pair(tt_id)
+            log.info("archived OpenTodo project %r: its TickTick list was deleted", name)
 
     def _collect_tt(
         self, w: World, project_ids: list[str], in_scope: set[str], dry_run: bool
@@ -459,6 +562,8 @@ class Syncer:
                 or (parent and not self._top_level_tt(w, str(parent)))
             ):
                 w.tt.out_of_scope.add(tid)
+                if task is not None and parent and task.project in in_scope:
+                    w.tt_waiting.add(tid)  # the parent may be completed: decided later
             else:
                 w.tt.tasks[tid] = task
 
@@ -469,9 +574,16 @@ class Syncer:
     def _collect_ot(self, w: World, in_scope: set[str], ot_tasks: list[JSON]) -> list[JSON]:
         """Top-level OpenTodo tasks; returns the open subtasks for :meth:`_collect_subtasks`."""
         unreadable_labels: set[str] = set()
+        created = self.state.get_meta_json(CREATED_LABELS) or {}
         for label in self.ot.labels():
             if label.get("deleted_at") is not None or not label.get("id"):
                 continue
+            lid = str(label["id"])
+            if label.get("name") == PLACEHOLDER and not label.get(UNREADABLE) and lid in created:
+                # Its tasks were skipped for good. Read it as named, and rename it back once
+                # the guards have passed (as for projects).
+                w.label_renames.append((lid, str(created[lid])))
+                label = label | {"name": created[lid]}
             if _unreadable(label, "name"):
                 log.warning(
                     "OpenTodo label %s: name unreadable; its tasks are skipped", label["id"]
@@ -579,10 +691,15 @@ class Syncer:
                 continue
             w.ot_raw[oid] = raw
             task = self._normalize(w.mapper.from_ot, raw, "OpenTodo", oid)
+            # A paired subtask of a completed parent stays (see _adopt_children); a new one
+            # isn't copied under a completed parent.
+            parent_known = parent_tt in w.tt.tasks or (
+                oid in task_ot_ids and parent_tt in w.tt.unchanged
+            )
             if (
                 task is None
                 or task.project not in in_scope
-                or parent_tt not in w.tt.tasks
+                or not parent_known
                 or (task.project in w.retiring and oid not in task_ot_ids)
             ):
                 w.ot.out_of_scope.add(oid)
@@ -619,14 +736,47 @@ class Syncer:
             if raw is None or raw.get("deleted"):
                 w.tt.deleted.add(p.tt_id)
                 continue
+            if raw.get("projectId"):
+                w.tt_lists_alive.add(str(raw["projectId"]))
             task = self._normalize(w.mapper.from_tt, raw, "TickTick", p.tt_id)
             if task is None or (raw.get("parentId") and raw["parentId"] not in w.tt.tasks):
                 w.tt.out_of_scope.add(p.tt_id)
+                if task is not None and raw.get("parentId"):
+                    # Its parent may be resolved later in this loop: decided after it.
+                    w.tt_raw[p.tt_id] = raw
+                    w.tt_waiting.add(p.tt_id)
             elif raw.get("status") in TT_DONE or task.project in in_scope:
                 w.tt_raw[p.tt_id] = raw
                 w.tt.tasks[p.tt_id] = task
             else:
                 w.tt.out_of_scope.add(p.tt_id)
+
+    def _adopt_children(self, w: World, in_scope: set[str]) -> None:
+        """Paired subtasks of a completed parent stay in scope, so their own completion syncs.
+
+        A subtask was in scope only while its parent was open in TickTick. Completed after
+        its parent, or with it when its pair row came first, it stayed open in OpenTodo for
+        good. Taken back: a paired subtask whose parent is a paired top-level task, completed
+        (fetched this pass, or known completed and unchanged).
+        """
+        for tid in sorted(w.tt_waiting):
+            raw = w.tt_raw.get(tid) or {}
+            parent = str(raw.get("parentId") or "")
+            parent_pair = w.pairs.get(parent)
+            if tid not in w.pairs or parent_pair is None:
+                continue
+            if parent in w.tt.tasks:
+                top_level = not (w.tt_raw.get(parent) or {}).get("parentId")
+            elif parent in w.tt.unchanged:
+                top_level = parent_pair.base is not None and parent_pair.base.parent is None
+            else:
+                continue  # deleted or out of scope: the subtask follows it
+            task = self._normalize(w.mapper.from_tt, raw, "TickTick", tid)
+            if not top_level or task is None:
+                continue
+            if raw.get("status") in TT_DONE or task.project in in_scope:
+                w.tt.out_of_scope.discard(tid)
+                w.tt.tasks[tid] = task
 
     @staticmethod
     def _normalize(fn: Callable[[JSON], Task], raw: JSON, side: str, task_id: str) -> Task | None:
@@ -657,8 +807,11 @@ class Syncer:
 
         if not dry_run and (actions or item_actions):
             self.state.check_writable()
+        self._deferrals = self.state.get_meta_json(DEFERRED) or {}
         for a in actions:
             self._apply(a, w, res, dry_run=dry_run)
+        if not dry_run:  # written only while something is deferred (SD card)
+            self.state.set_meta_json(DEFERRED, w.deferred or None)
         self._apply_items(item_actions, w, res, dry_run=dry_run)
         if not dry_run:
             self._retire_projects(w, res)
@@ -716,6 +869,7 @@ class Syncer:
                     return None
 
         actions = self._mark_tt_occurrences(engine.plan(w.pairs.values(), w.tt, w.ot), w)
+        actions = self._out_of_retiring(actions, w)
         # Parents before their subtasks, so a new subtask's parent exists when it is created.
         actions.sort(key=lambda a: a.task is not None and a.task.parent is not None)
         item_actions = self._plan_items(w, actions)
@@ -740,15 +894,27 @@ class Syncer:
         if deletes or item_deletes:
             n = len(deletes) + len(item_deletes)
             recent = deletes_in_last_day(self.state, self.now_ms())
-            if recent + n > self.max_deletes_per_day:
+            # Once tripped, it holds while deletions are planned: when the window rolled
+            # over, what it had blocked went through unreviewed, so a fault deleting a few
+            # tasks every pass carried on at the daily limit.
+            stored = self.state.get_meta_json("blocked") or {}
+            held = stored.get("guard") == DAILY_GUARD
+            if held or recent + n > self.max_deletes_per_day:
+                reason = (
+                    f"{n} deletions on top of {recent} in the last 24 hours exceed "
+                    if not held
+                    else f"{n} deletions, held back since the daily cap tripped: "
+                )
                 self._block(
                     res,
-                    f"{n} deletions on top of {recent} in the last 24 hours exceed "
-                    f"TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY={self.max_deletes_per_day}; "
+                    reason
+                    + f"TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY={self.max_deletes_per_day}; "
                     "nothing written. Review, then run once with --allow-bulk.",
                     [self._describe(a, w) for a in deletes]
                     + [self._describe_item(a, w) for a in item_deletes],
                     dry_run=dry_run,
+                    guard=DAILY_GUARD,
+                    since=stored.get("at") if held else None,
                 )
                 return None
         # Many new tasks at once, once pairs exist: most likely tasks whose pairs were lost
@@ -765,18 +931,96 @@ class Syncer:
                 dry_run=dry_run,
             )
             return None
+        # Many TickTick tasks overwritten at once: anything that makes every OpenTodo copy
+        # look edited (2026-11-21: ciphertext, 66 tasks) goes straight into the primary,
+        # which keeps no history the sync could restore from. Writes to OpenTodo, which
+        # does, aren't counted.
+        updates = [a for a in actions if a.kind is Kind.UPDATE_TT]
+        if len(updates) > self.max_updates:
+            self._block(
+                res,
+                f"{len(updates)} TickTick tasks to overwrite exceed "
+                f"TICKTICK_OPENTODO_SYNC_MAX_UPDATES={self.max_updates}; nothing written. "
+                "Review (a bulk edit in OpenTodo, or something misread?), then run once with "
+                "--allow-bulk.",
+                [self._describe(a, w) for a in updates],
+                dry_run=dry_run,
+            )
+            return None
         return actions, item_actions
 
-    def _block(self, res: PassResult, reason: str, blocked: list[str], *, dry_run: bool) -> None:
-        """A guard tripped: log what it holds back and record it (``--status``, health)."""
+    def _out_of_retiring(self, actions: list[Action], w: World) -> list[Action]:
+        """TickTick wins a move into a project whose TickTick list was deleted.
+
+        The project is still visible in OpenTodo until it's archived. A paired task moved
+        into it there was pushed to TickTick, where the list is gone: an error every pass,
+        which also kept the project from being archived. Now the task keeps its TickTick
+        list, and OpenTodo is moved back.
+        """
+        out: list[Action] = []
+        for a in actions:
+            tt_task = w.tt.tasks.get(a.tt_id or "")
+            ot_task = w.ot.tasks.get(a.ot_id or "")
+            if (
+                a.kind is not Kind.UPDATE_TT
+                or a.task is None
+                or a.task.project not in w.retiring
+                or tt_task is None
+                or ot_task is None
+            ):
+                out.append(a)
+                continue
+            fixed = replace(a.task, project=tt_task.project)
+            if a.occurrence:
+                # OpenTodo moved on already: complete in TickTick, move OpenTodo next pass.
+                out.append(replace(a, task=fixed))
+                continue
+            write_tt = fixed != tt_task
+            out.append(
+                Action(
+                    Kind.UPDATE_OT,
+                    tt_id=a.tt_id,
+                    ot_id=a.ot_id,
+                    task=fixed,
+                    tt_hash=None if write_tt else tt_task.content_hash(),
+                    conflict=True,
+                    completes=fixed.completed and not ot_task.completed,
+                    note="moved into a project whose TickTick list was deleted: moved back",
+                )
+            )
+            if write_tt:
+                out.append(replace(a, task=fixed, ot_hash=None))
+        return out
+
+    def _block(
+        self,
+        res: PassResult,
+        reason: str,
+        blocked: list[str],
+        *,
+        dry_run: bool,
+        guard: str | None = None,
+        since: object = None,
+    ) -> None:
+        """A guard tripped: log what it holds back and record it (``--status``, health).
+
+        ``guard``: recorded for a block that holds until ``--allow-bulk`` (or until nothing
+        it guards is planned), not until its own condition clears. ``since``: when it first
+        tripped, kept while it holds.
+        """
         res.blocked = reason
         log.warning("%s", reason)
         for line in blocked:
             log.warning("  blocked: %s", line)
         if not dry_run:
-            self.state.set_meta_json(
-                "blocked", {"at": self.now_ms(), "count": len(blocked), "reason": reason}
-            )
+            record: dict[str, object] = {
+                "at": since if isinstance(since, int) else self.now_ms(),
+                "count": len(blocked),
+                "reason": reason,
+            }
+            if guard:
+                record["guard"] = guard
+            self.state.set_meta_json("blocked", record)
 
     def _mark_tt_occurrences(self, actions: list[Action], w: World) -> list[Action]:
         """Tell a repeating task completed in TickTick from one that was only moved.
@@ -907,10 +1151,25 @@ class Syncer:
             raise
         except ChangedDuringPassError as exc:
             # Nothing written, nothing recorded: the next pass plans it again with the edit.
-            log.info("left for the next pass: %s (%s)", desc, exc)
+            assert a.tt_id
+            w.deferred[a.tt_id] = self._deferrals.get(a.tt_id, 0) + 1
+            if w.deferred[a.tt_id] < DEFERRALS_BEFORE_ERROR:
+                log.info("left for the next pass: %s (%s)", desc, exc)
+                return
+            # A real edit is picked up by the next pass. Every pass in a row means the two
+            # TickTick endpoints disagree on an unchanged task: the write never happens.
+            res.errors += 1
+            log.warning(
+                "left for the next pass %d times in a row, so probably not an edit: %s (%s)",
+                w.deferred[a.tt_id],
+                desc,
+                exc,
+            )
             return
         except Exception as exc:
             res.errors += 1
+            if a.ot_id:
+                w.failed_ot.add(a.ot_id)
             log.error("failed to %s: %s", desc, exc)  # noqa: TRY400
             log.debug("traceback", exc_info=True)
             return
@@ -926,6 +1185,9 @@ class Syncer:
                 created = self.ot.create_label(tag)
                 w.label_ids[tag] = str(created["id"])
                 w.mapper.label_names[w.label_ids[tag]] = tag
+                # Remembered until the next pass sees it (see _repair_labels).
+                mine = self.state.get_meta_json(CREATED_LABELS) or {}
+                self.state.set_meta_json(CREATED_LABELS, mine | {w.label_ids[tag]: tag})
 
     def _create_ot(self, a: Action, w: World) -> None:
         assert a.tt_id and a.task
@@ -1012,8 +1274,11 @@ class Syncer:
         raw = self.tt.get_task(project, a.tt_id)
         if raw is None:
             raise RuntimeError("TickTick task no longer exists")
-        if collected is not None and _tt_view(w, raw) != _tt_view(w, collected):
-            raise ChangedDuringPassError("changed in TickTick since this pass read it")
+        if collected is not None and (now := _tt_view(w, raw)) != (then := _tt_view(w, collected)):
+            fields = changed_fields(then[0], now[0]) + (["checklist"] if now[1] != then[1] else [])
+            raise ChangedDuringPassError(
+                f"changed in TickTick since this pass read it: {', '.join(fields)}"
+            )
         target = w.mapper.tt_project_id(a.task.project)
         if raw.get("projectId") != target:
             self.tt.move_task(a.tt_id, str(raw.get("projectId") or pair.tt_project), target)
@@ -1125,7 +1390,7 @@ class Syncer:
                 self._apply_item_ot(a, w, res)
         for parent, group in to_tt.items():
             try:
-                self._apply_items_tt(parent, group, w)
+                applied = self._apply_items_tt(parent, group, w)
             except sqlite3.Error:
                 raise  # see _apply
             except Exception as exc:
@@ -1133,7 +1398,7 @@ class Syncer:
                 log.error("failed to update checklist of %s: %s", parent, exc)  # noqa: TRY400
                 log.debug("traceback", exc_info=True)
                 continue
-            for a in group:
+            for a in applied:
                 log.info("%s", self._describe_item(a, w))
                 _count_item(a, res)
 
@@ -1209,8 +1474,13 @@ class Syncer:
             table=ITEMS,
         )
 
-    def _apply_items_tt(self, parent: str, group: list[Action], w: World) -> None:
-        """All of one task's item changes in one TickTick write (items live in the task)."""
+    def _apply_items_tt(self, parent: str, group: list[Action], w: World) -> list[Action]:
+        """All of one task's item changes in one TickTick write (items live in the task).
+
+        Returns the actions applied. An item changed in TickTick since the pass read it is
+        left for the next pass, as whole tasks are (see _update_tt): its planned state was
+        written over the change (a tick made meanwhile was undone, for good).
+        """
         pair = w.pairs[parent]
         project = str((w.tt_raw.get(parent) or {}).get("projectId") or pair.tt_project)
         raw = self.tt.get_task(project, parent)  # fresh: a task action may have written it
@@ -1219,6 +1489,9 @@ class Syncer:
         items: list[JSON] = [dict(i) for i in raw.get("items") or [] if isinstance(i, dict)]
         by_id = {str(i.get("id")): i for i in items}
         old_ids = set(by_id)
+        group = [a for a in group if not self._item_changed_meanwhile(a, by_id, parent, w)]
+        if not group:
+            return []
         creates: list[Action] = []
         next_order = max((i.get("sortOrder") or 0 for i in items), default=0)
         for a in group:
@@ -1273,6 +1546,21 @@ class Syncer:
                 ),
                 table=ITEMS,
             )
+        return group
+
+    def _item_changed_meanwhile(
+        self, a: Action, fresh: dict[str, JSON], parent: str, w: World
+    ) -> bool:
+        if a.kind not in (Kind.UPDATE_TT, Kind.DELETE_TT):
+            return False
+        then, now = w.tt_item_raw.get(a.tt_id or ""), fresh.get(a.tt_id or "")
+        if then is None or now is None or item_from_tt(now, parent) == item_from_tt(then, parent):
+            return False
+        log.info(
+            "left for the next pass: %s (changed in TickTick since this pass read it)",
+            self._describe_item(a, w),
+        )
+        return True
 
     # --- reports ----------------------------------------------------------------------
 
@@ -1413,6 +1701,11 @@ def _count(a: Action, res: PassResult) -> None:
 
 
 DAY_MS = 24 * 60 * 60 * 1000
+DEFERRED = "deferred"
+"""Meta key: ``{TickTick id: passes in a row}`` of writes left for the next pass."""
+DEFERRALS_BEFORE_ERROR = 3
+DAILY_GUARD = "daily"
+"""``blocked`` meta ``guard`` of the daily delete cap: it holds until --allow-bulk."""
 RECENT_DELETES = "recent_deletes"
 """Meta key: ``[[at_ms, count], ...]`` of the passes that deleted, for the daily budget."""
 
@@ -1455,7 +1748,8 @@ def _tt_view(w: World, raw: JSON) -> tuple[Task, list[tuple[str, str, object]]]:
     Normalized, so the list and single-task endpoints compare equal when nothing changed.
     """
     items = [
-        (str(i.get("id")), str(i.get("title") or ""), i.get("status"))
+        # A missing status is unchecked, as for the other fields' missing values.
+        (str(i.get("id")), str(i.get("title") or ""), i.get("status") or 0)
         for i in raw.get("items") or []
         if isinstance(i, dict)
     ]

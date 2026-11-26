@@ -134,10 +134,10 @@ Run commands from this directory: the sync reads `./.env` (or the file given wit
 
 To keep it running, pick one:
 
-- **cron:** run one pass every 5 minutes. With `TICKTICK_OPENTODO_SYNC_DRY_RUN=false` in `.env`, no flag is needed. Overlapping runs are safe: a run that finds another holding the lock waits, then exits with code 3.
+- **cron:** run one pass every 5 minutes. With `TICKTICK_OPENTODO_SYNC_DRY_RUN=false` in `.env`, no flag is needed. Overlapping runs are safe: a run that finds another holding the lock waits, then exits with code 3. The shell creates `sync.log`, so `umask 077` keeps it, and the task titles it holds, readable by you only.
 
   ```cron
-  */5 * * * * cd /path/to/ticktick-opentodo-sync && .venv/bin/ticktick-opentodo-sync >> sync.log 2>&1
+  */5 * * * * cd /path/to/ticktick-opentodo-sync && umask 077 && .venv/bin/ticktick-opentodo-sync >> sync.log 2>&1
   ```
 
 - **systemd:** let the sync loop on its own (`--loop`, one pass every `TICKTICK_OPENTODO_SYNC_INTERVAL` seconds) as a service. For example, `/etc/systemd/system/ticktick-opentodo-sync.service`:
@@ -195,9 +195,11 @@ docker compose run --rm ticktick-opentodo-sync --apply --allow-bulk
 
 The same limit applies to habit check-ins being cleared, in either app: those block the same way, after the task changes of that pass are written.
 
-Deletions are also limited over time. If a pass would take the deletions of the last 24 hours past `TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY` (default 50), it blocks the same way. This catches a fault that deletes a few tasks every pass and so never trips the per-pass limit. Deletions you approve with `--allow-bulk` don't count. `--status` shows the count so far: `deletes (24 h): 3 of 50`.
+Deletions are also limited over time. If a pass would take the deletions of the last 24 hours past `TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY` (default 50), it blocks the same way. This catches a fault that deletes a few tasks every pass and so never trips the per-pass limit. Once it trips, the block holds even after the 24 hours roll over, so what it held back is never applied unreviewed. It lifts with `--allow-bulk`, or by itself once no deletion is planned. Deletions you approve with `--allow-bulk` don't count. `--status` shows the count so far: `deletes (24 h): 3 of 50`.
 
 New tasks are limited per pass too, through `TICKTICK_OPENTODO_SYNC_MAX_CREATES` (default 50, not applied to the first seed). Many new tasks at once most likely means lost pairs, for example an older state backup restored: every task made since would be duplicated in both apps. A legitimate bulk add, such as a large template, goes through with `--allow-bulk`.
+
+So are overwrites of TickTick tasks, through `TICKTICK_OPENTODO_SYNC_MAX_UPDATES` (default 50). Writes to OpenTodo aren't counted, as it keeps each task's history and TickTick has nothing the sync could restore from. Many at once is a bulk edit in OpenTodo, or something misread as one. That's what happened on 2026-11-21, when ciphertext read as an edit overwrote 66 TickTick tasks. A real bulk edit made in OpenTodo goes through with `--allow-bulk`.
 
 ### Exit codes
 
@@ -217,6 +219,7 @@ New tasks are limited per pass too, through `TICKTICK_OPENTODO_SYNC_MAX_CREATES`
   - **"After completion" rules** always just move the date.
 - **Lists and projects:** matched by name, then by ID; a list or project that exists on one side only is created on the other.
   - Deleting a list in TickTick archives its OpenTodo project, after its tasks have gone to OpenTodo's Trash through the bulk-delete guard.
+  - A list or project missing from one listing isn't taken as deleted while its tasks, or the project itself, can still be found. The sync logs a warning and leaves it as it is.
   - Deleting a project in OpenTodo brings it back from the Trash with its tasks (TickTick wins).
   - A new list is never paired with an archived project.
 - **Subtasks:** TickTick checklist items appear in OpenTodo as subtasks, ticked items as completed ones, and TickTick child tasks as OpenTodo subtasks. Titles and ticks sync both ways, as do adding and deleting. A subtask added in OpenTodo becomes a checklist item if the TickTick task is a checklist, otherwise a TickTick child task. Order is copied when an item is created, not afterwards. On a conflict TickTick wins, including whether an item is ticked.
@@ -270,14 +273,14 @@ State lives in the Docker volume `ticktick-opentodo-sync-data`, in `/data/tickti
 - a few settings;
 - the last-synced copy of each task (title, notes, dates…), used to tell which side changed.
 
-That last item is task content, decrypted, so treat the volume, and any copy of it, as private. `*.sqlite3*` and `*.log` files are gitignored, so a backup or a cron log made in the checkout can't be committed by accident.
+That last item is task content, decrypted, so treat the volume, and any copy of it, as private. `*.sqlite3*` and `*.log` files are gitignored, so a backup or a cron log made in the checkout can't be committed by accident. The backup stops the container first: a copy taken while a pass writes can be inconsistent.
 
 ```sh
-docker compose cp ticktick-opentodo-sync:/data/ticktick-opentodo-sync.sqlite3 ./backup.sqlite3   # backup
+docker compose stop && docker compose cp ticktick-opentodo-sync:/data/ticktick-opentodo-sync.sqlite3 ./backup.sqlite3 && docker compose start   # backup
 docker compose down && docker volume rm ticktick-opentodo-sync-data                              # full reset
 ```
 
-After a reset, every task looks new on both sides. Empty OpenTodo or use `--match-existing` before syncing again. Habits are paired again by name on the next pass, and the **Habits** project is recognised again: a project with that name holding habits.
+After a reset, every task looks new on both sides. Empty OpenTodo or use `--match-existing` before syncing again. Habits are paired again by name on the next pass, and the **Habits** project is recognised again: a project with that name holding habits, unless it belongs to a TickTick list of that name.
 
 ## Development
 

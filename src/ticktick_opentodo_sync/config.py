@@ -29,6 +29,7 @@ KNOWN_SETTINGS = frozenset(
         "MAX_DESTRUCTIVE",
         "MAX_DELETES_PER_DAY",
         "MAX_CREATES",
+        "MAX_UPDATES",
         "INTERVAL",
         "TIMEZONE",
         "LOG_LEVEL",
@@ -70,6 +71,7 @@ class Config:
     max_destructive: int = 10
     max_deletes_per_day: int = 50
     max_creates: int = 50
+    max_updates: int = 50
     timezone: str | None = None
     interval: int = 300
     http_min_interval: float = 0.3
@@ -206,6 +208,11 @@ def load(env: Mapping[str, str] | None = None, env_file: Path | None = None) -> 
             str(get("TICKTICK_OPENTODO_SYNC_MAX_CREATES", "50")),
             0,
         ),
+        max_updates=_int(
+            "TICKTICK_OPENTODO_SYNC_MAX_UPDATES",
+            str(get("TICKTICK_OPENTODO_SYNC_MAX_UPDATES", "50")),
+            0,
+        ),
         timezone=tz,
         interval=_int(
             "TICKTICK_OPENTODO_SYNC_INTERVAL",
@@ -248,10 +255,14 @@ def _base_url(name: str, url: str, allow_http: bool, warnings: list[str]) -> str
     encryption key record (salt, iterations, wrapped key: enough to guess the passphrase
     offline). The URL is never echoed: it could carry credentials.
     """
-    parts = urlsplit(url)
-    if parts.scheme not in ("https", "http") or not parts.hostname:
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname
+    except ValueError:  # e.g. "https://[::1": a traceback instead of a config error
+        hostname = None
+    if not hostname or parts.scheme not in ("https", "http"):
         raise ConfigError(f"{name} must be a URL like https://todo.example.com")
-    if parts.scheme == "http" and not _loopback(parts.hostname):
+    if parts.scheme == "http" and not _loopback(hostname):
         if not allow_http:
             raise ConfigError(
                 f"{name} uses http://, which sends the token (and OpenTodo's encryption key "

@@ -303,6 +303,7 @@ def reconcile_projects(
 
     taken = set(plan.pairs.values()) | retired
     ot_by_name: dict[str, str] = {}
+    duplicates: list[str] = []
     # Active projects first: a name an archived project shares goes to the active one.
     for ot_id, info in sorted(ot.items(), key=lambda kv: (not kv[1].active, kv[1].name)):
         if ot_id in taken:
@@ -310,9 +311,14 @@ def reconcile_projects(
         key = info.name.strip().casefold()
         if key in ot_by_name:
             if info.active:
+                # Pairs go by id once made: each one gets its own list. Left for later, its
+                # tasks failed every pass with "has no TickTick list yet" until it got one.
                 log.warning(
-                    "duplicate OpenTodo project name %r; matching only the first", info.name
+                    "duplicate OpenTodo project name %r: only the first is matched by name; "
+                    "the others each get a TickTick list of their own",
+                    info.name,
                 )
+                duplicates.append(ot_id)
             continue
         ot_by_name[key] = ot_id
 
@@ -329,7 +335,7 @@ def reconcile_projects(
         elif info.active:
             plan.create_in_ot.append((tt_id, info.name))
 
-    for ot_id in ot_by_name.values():
+    for ot_id in [*ot_by_name.values(), *duplicates]:
         if ot[ot_id].active:
             plan.create_in_tt.append((ot_id, ot[ot_id].name))
     return plan

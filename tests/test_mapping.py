@@ -106,6 +106,21 @@ def test_reconcile_projects() -> None:
     assert plan.create_in_tt == [("o2", "Garden")]  # archived is not created
 
 
+def test_duplicate_opentodo_project_names_each_get_a_list() -> None:
+    """Only the first got one; the others' tasks failed until a later pass (review #33)."""
+    ot = {
+        "o1": ProjectInfo("Ideas", True),
+        "o2": ProjectInfo("ideas", True),  # e.g. sub-projects of different parents
+        "o3": ProjectInfo("Ideas", False),  # archived: never created
+    }
+    plan = reconcile_projects({}, {}, ot)
+    assert sorted(plan.create_in_tt) == [("o1", "Ideas"), ("o2", "ideas")]
+    # With a list of that name, the first is matched and the other still gets its own.
+    plan = reconcile_projects({}, {"t1": ProjectInfo("Ideas", True)}, ot)
+    assert plan.new_pairs == [("t1", "o1", "Ideas")]
+    assert plan.create_in_tt == [("o2", "ideas")]
+
+
 def test_reconcile_projects_after_deletions() -> None:
     tt = {"t1": ProjectInfo("Work", True), "t2": ProjectInfo("Home", True)}
     tt |= {"t5": ProjectInfo("Shop", True)}

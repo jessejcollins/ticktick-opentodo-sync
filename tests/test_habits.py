@@ -383,6 +383,26 @@ def test_state_reset_pairs_habits_and_the_habits_project_again(env: Env, tmp_pat
     env.quiet()
 
 
+def test_a_list_called_habits_keeps_its_project(env: Env) -> None:
+    """With no habits project in meta yet, a habit made in the project of a TickTick list
+    called "Habits" made the lookup take that project: the list got a new one, and its
+    tasks stopped syncing (review #26)."""
+    lst = env.tt.add_project("Habits")
+    tid = env.tt.add_task("Buy running shoes", lst)
+    env.run()
+    (otp,) = env.ot.projects_
+    env.ot.add_task("Meditate", otp, habit=True, recurrence=EVERY_DAY, due={"date": "2026-11-24"})
+    res = env.run()
+    assert res.habits_tt.created == 1, res.summary()  # the habit itself still syncs
+    assert env.state.project_pairs() == {lst: otp}
+    assert env.state.get_meta(META_PROJECT) != otp
+    assert [p["name"] for p in env.ot.projects_.values()] == ["Habits"]
+    env.tt.tasks[tid]["title"] = "Buy trail shoes"
+    env.run()
+    assert any(t["title"] == "Buy trail shoes" for t in env.ot.tasks_.values())
+    env.quiet()
+
+
 def test_same_habit_made_in_both_apps_is_paired(env: Env) -> None:
     env.tt.add_habit("Stretch")
     env.ot.add_task("stretch", None, habit=True, recurrence=EVERY_DAY, due={"date": "2026-11-24"})

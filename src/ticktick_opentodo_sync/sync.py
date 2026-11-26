@@ -192,6 +192,7 @@ class Syncer:
         timezone: str | None = None,
         max_destructive: int = 10,
         max_deletes_per_day: int = 50,
+        max_creates: int = 50,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
         self.tt = tt
@@ -200,6 +201,7 @@ class Syncer:
         self.timezone = timezone
         self.max_destructive = max_destructive
         self.max_deletes_per_day = max_deletes_per_day
+        self.max_creates = max_creates
         self.now_ms = now_ms
         self.run_id = str(now_ms())
         self._habit_notes: set[str] = set()
@@ -749,6 +751,20 @@ class Syncer:
                     dry_run=dry_run,
                 )
                 return None
+        # Many new tasks at once, once pairs exist: most likely tasks whose pairs were lost
+        # (an older state backup restored), about to be duplicated in both apps. Not on the
+        # first seed, and not checklist items, which legitimately arrive in bulk.
+        creates = [a for a in actions if a.kind in (Kind.CREATE_OT, Kind.CREATE_TT)]
+        if len(creates) > self.max_creates and self.state.pair_count():
+            self._block(
+                res,
+                f"{len(creates)} new tasks exceed "
+                f"TICKTICK_OPENTODO_SYNC_MAX_CREATES={self.max_creates}; nothing written. "
+                "Review (an older state backup restored?), then run once with --allow-bulk.",
+                [self._describe(a, w) for a in creates],
+                dry_run=dry_run,
+            )
+            return None
         return actions, item_actions
 
     def _block(self, res: PassResult, reason: str, blocked: list[str], *, dry_run: bool) -> None:

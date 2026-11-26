@@ -441,6 +441,26 @@ def test_deletions_over_a_day_are_capped(env: Env) -> None:
     assert run().ot.deleted == 2
 
 
+def test_many_new_tasks_at_once_block(env: Env) -> None:
+    """Restoring an older state backup unpairs every task made since: each would be duplicated
+    in both apps in one pass (review #22)."""
+
+    def run(**kw: Any) -> PassResult:
+        return Syncer(env.tt, env.ot, env.state, max_creates=3).run(dry_run=False, **kw)
+
+    for i in range(5):
+        env.tt.add_task(f"seed {i}")
+    assert run().ot.created == 5  # the first seed isn't capped
+    for i in range(4):
+        env.tt.add_task(f"new {i}")
+    writes = len(env.ot.writes)
+    res = run()
+    assert res.blocked and "MAX_CREATES" in res.blocked
+    assert len(env.ot.writes) == writes
+    assert run(allow_bulk=True).ot.created == 4
+    env.assert_quiet()
+
+
 def test_bulk_guard_blocks_then_allow_bulk(env: Env) -> None:
     a, b = seed(env)
     env.max_destructive = 1

@@ -28,6 +28,7 @@ The same tasks show up in both apps, so someone can keep using TickTick day to d
 - **Never delete in bulk by accident.** If a pass would delete or complete more than N tasks (configurable, default 10), it stops, logs a warning and records the block. In one-shot mode it exits non-zero. In loop mode the container keeps running and reports unhealthy until a run with `--allow-bulk` clears the block.
   - The same applies across passes: deletions over any 24 hours are capped too (`MAX_DELETES_PER_DAY`, default 50; `--allow-bulk` deletions don't count), so a fault that deletes a few tasks every pass is caught as well.
   - The habit guard (check-ins cleared, in either app) blocks the same way.
+  - So do more than `MAX_CREATES` new tasks in one pass (default 50; not the first seed, not checklist items). That is most likely lost pairs, e.g. an older state backup restored, about to be duplicated in both apps.
 - **Code style:** idiomatic, fully typed Python; `ruff` and `mypy --strict` clean.
 
 ## Sync rules

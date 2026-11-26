@@ -209,6 +209,7 @@ class Syncer:
         max_destructive: int = 10,
         max_deletes_per_day: int = 50,
         max_creates: int = 50,
+        max_updates: int = 50,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
         self.tt = tt
@@ -218,6 +219,7 @@ class Syncer:
         self.max_destructive = max_destructive
         self.max_deletes_per_day = max_deletes_per_day
         self.max_creates = max_creates
+        self.max_updates = max_updates
         self.now_ms = now_ms
         self.run_id = str(now_ms())
         self._habit_notes: set[str] = set()
@@ -919,6 +921,22 @@ class Syncer:
                 f"TICKTICK_OPENTODO_SYNC_MAX_CREATES={self.max_creates}; nothing written. "
                 "Review (an older state backup restored?), then run once with --allow-bulk.",
                 [self._describe(a, w) for a in creates],
+                dry_run=dry_run,
+            )
+            return None
+        # Many TickTick tasks overwritten at once: anything that makes every OpenTodo copy
+        # look edited (2026-11-21: ciphertext, 66 tasks) goes straight into the primary,
+        # which keeps no history the sync could restore from. Writes to OpenTodo, which
+        # does, aren't counted.
+        updates = [a for a in actions if a.kind is Kind.UPDATE_TT]
+        if len(updates) > self.max_updates:
+            self._block(
+                res,
+                f"{len(updates)} TickTick tasks to overwrite exceed "
+                f"TICKTICK_OPENTODO_SYNC_MAX_UPDATES={self.max_updates}; nothing written. "
+                "Review (a bulk edit in OpenTodo, or something misread?), then run once with "
+                "--allow-bulk.",
+                [self._describe(a, w) for a in updates],
                 dry_run=dry_run,
             )
             return None

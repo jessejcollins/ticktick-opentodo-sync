@@ -648,6 +648,29 @@ def test_many_new_tasks_at_once_block(env: Env) -> None:
     env.assert_quiet()
 
 
+def test_many_ticktick_overwrites_at_once_block(env: Env) -> None:
+    """Every OpenTodo copy reading as edited went straight into TickTick: 2026-11-21's 66
+    tasks overwritten with ciphertext (review #30)."""
+
+    def run(**kw: Any) -> PassResult:
+        return Syncer(env.tt, env.ot, env.state, max_updates=3).run(dry_run=False, **kw)
+
+    tids = [env.tt.add_task(f"task {i}", content=f"notes {i}") for i in range(5)]
+    run()
+    for tid in tids:  # bulk edits made in TickTick go to OpenTodo: not capped
+        env.tt.tasks[tid]["priority"] = 5
+    assert run().ot.updated == 5
+    for t in env.ot.tasks_.values():  # e.g. a changed notes format read back from OpenTodo
+        t["description"] = "<p></p>"
+    writes = len(env.tt.writes)
+    res = run()
+    assert res.blocked and "MAX_UPDATES" in res.blocked, res.summary()
+    assert len(env.tt.writes) == writes
+    assert all(env.tt.tasks[t]["content"].startswith("notes") for t in tids)
+    assert run(allow_bulk=True).tt.updated == 5
+    env.assert_quiet()
+
+
 def test_bulk_guard_blocks_then_allow_bulk(env: Env) -> None:
     a, b = seed(env)
     env.max_destructive = 1

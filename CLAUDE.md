@@ -29,6 +29,7 @@ The same tasks show up in both apps, so someone can keep using TickTick day to d
   - The same applies across passes: deletions over any 24 hours are capped too (`MAX_DELETES_PER_DAY`, default 50; `--allow-bulk` deletions don't count), so a fault that deletes a few tasks every pass is caught as well. Once it trips it holds, also after the 24 hours roll over, until `--allow-bulk` or until no deletion is planned.
   - The habit guard (check-ins cleared, in either app) blocks the same way.
   - So do more than `MAX_CREATES` new tasks in one pass (default 50; not the first seed, not checklist items). That is most likely lost pairs, e.g. an older state backup restored, about to be duplicated in both apps.
+  - And more than `MAX_UPDATES` TickTick tasks overwritten in one pass (default 50; writes to OpenTodo, which keeps history, aren't counted). The 2026-11-21 incident overwrote 66.
 - **Code style:** idiomatic, fully typed Python; `ruff` and `mypy --strict` clean.
 
 ## Sync rules

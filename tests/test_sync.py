@@ -595,6 +595,39 @@ def test_deletions_over_a_day_are_capped(env: Env) -> None:
     assert run().ot.deleted == 2
 
 
+def test_daily_cap_holds_until_allow_bulk(env: Env) -> None:
+    """What it blocked went through unreviewed once the window rolled over (review #29)."""
+    clock = [1_800_000_000_000]
+
+    def run(**kw: Any) -> PassResult:
+        syncer = Syncer(env.tt, env.ot, env.state, max_deletes_per_day=3, now_ms=lambda: clock[0])
+        return syncer.run(dry_run=False, **kw)
+
+    work = env.tt.add_project("Work")
+    tids = [env.tt.add_task(f"t{i}", work) for i in range(8)]
+    run()
+    for tid in tids[:3]:
+        del env.tt.tasks[tid]
+    assert run().ot.deleted == 3  # the day's budget
+    gone = {tid: env.tt.tasks.pop(tid) for tid in tids[3:5]}  # a fault keeps "deleting"
+    assert run().blocked
+    tripped = env.state.get_meta_json("blocked")["at"]
+    clock[0] += 25 * 60 * 60 * 1000  # the window rolls over
+    res = run()
+    assert res.blocked and not res.ot.deleted, res.summary()
+    assert env.state.get_meta_json("blocked")["at"] == tripped  # since when, kept
+    env.tt.tasks.update(gone)  # the fault goes away: nothing to delete, the block lifts
+    assert run().ok and env.state.get_meta_json("blocked") is None
+    for tid in tids[3:7]:  # 4 > 3 (the first 3 are a day old): it trips again
+        del env.tt.tasks[tid]
+    assert run().blocked
+    clock[0] += 25 * 60 * 60 * 1000
+    assert run().blocked
+    assert run(allow_bulk=True).ot.deleted == 4  # --allow-bulk lifts it
+    del env.tt.tasks[tids[7]]
+    assert run().ot.deleted == 1  # back to the plain daily budget
+
+
 def test_many_new_tasks_at_once_block(env: Env) -> None:
     """Restoring an older state backup unpairs every task made since: each would be duplicated
     in both apps in one pass (review #22)."""

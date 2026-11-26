@@ -885,15 +885,27 @@ class Syncer:
         if deletes or item_deletes:
             n = len(deletes) + len(item_deletes)
             recent = deletes_in_last_day(self.state, self.now_ms())
-            if recent + n > self.max_deletes_per_day:
+            # Once tripped, it holds while deletions are planned: when the window rolled
+            # over, what it had blocked went through unreviewed, so a fault deleting a few
+            # tasks every pass carried on at the daily limit.
+            stored = self.state.get_meta_json("blocked") or {}
+            held = stored.get("guard") == DAILY_GUARD
+            if held or recent + n > self.max_deletes_per_day:
+                reason = (
+                    f"{n} deletions on top of {recent} in the last 24 hours exceed "
+                    if not held
+                    else f"{n} deletions, held back since the daily cap tripped: "
+                )
                 self._block(
                     res,
-                    f"{n} deletions on top of {recent} in the last 24 hours exceed "
-                    f"TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY={self.max_deletes_per_day}; "
+                    reason
+                    + f"TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY={self.max_deletes_per_day}; "
                     "nothing written. Review, then run once with --allow-bulk.",
                     [self._describe(a, w) for a in deletes]
                     + [self._describe_item(a, w) for a in item_deletes],
                     dry_run=dry_run,
+                    guard=DAILY_GUARD,
+                    since=stored.get("at") if held else None,
                 )
                 return None
         # Many new tasks at once, once pairs exist: most likely tasks whose pairs were lost
@@ -955,16 +967,35 @@ class Syncer:
                 out.append(replace(a, task=fixed, ot_hash=None))
         return out
 
-    def _block(self, res: PassResult, reason: str, blocked: list[str], *, dry_run: bool) -> None:
-        """A guard tripped: log what it holds back and record it (``--status``, health)."""
+    def _block(
+        self,
+        res: PassResult,
+        reason: str,
+        blocked: list[str],
+        *,
+        dry_run: bool,
+        guard: str | None = None,
+        since: object = None,
+    ) -> None:
+        """A guard tripped: log what it holds back and record it (``--status``, health).
+
+        ``guard``: recorded for a block that holds until ``--allow-bulk`` (or until nothing
+        it guards is planned), not until its own condition clears. ``since``: when it first
+        tripped, kept while it holds.
+        """
         res.blocked = reason
         log.warning("%s", reason)
         for line in blocked:
             log.warning("  blocked: %s", line)
         if not dry_run:
-            self.state.set_meta_json(
-                "blocked", {"at": self.now_ms(), "count": len(blocked), "reason": reason}
-            )
+            record: dict[str, object] = {
+                "at": since if isinstance(since, int) else self.now_ms(),
+                "count": len(blocked),
+                "reason": reason,
+            }
+            if guard:
+                record["guard"] = guard
+            self.state.set_meta_json("blocked", record)
 
     def _mark_tt_occurrences(self, actions: list[Action], w: World) -> list[Action]:
         """Tell a repeating task completed in TickTick from one that was only moved.
@@ -1606,6 +1637,8 @@ def _count(a: Action, res: PassResult) -> None:
 
 
 DAY_MS = 24 * 60 * 60 * 1000
+DAILY_GUARD = "daily"
+"""``blocked`` meta ``guard`` of the daily delete cap: it holds until --allow-bulk."""
 RECENT_DELETES = "recent_deletes"
 """Meta key: ``[[at_ms, count], ...]`` of the passes that deleted, for the daily budget."""
 

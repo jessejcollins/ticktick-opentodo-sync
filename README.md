@@ -195,7 +195,7 @@ docker compose run --rm ticktick-opentodo-sync --apply --allow-bulk
 
 The same limit applies to habit check-ins being cleared, in either app: those block the same way, after the task changes of that pass are written.
 
-Deletions are also limited over time. If a pass would take the deletions of the last 24 hours past `TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY` (default 50), it blocks the same way. This catches a fault that deletes a few tasks every pass and so never trips the per-pass limit. Deletions you approve with `--allow-bulk` don't count. `--status` shows the count so far: `deletes (24 h): 3 of 50`.
+Deletions are also limited over time. If a pass would take the deletions of the last 24 hours past `TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY` (default 50), it blocks the same way. This catches a fault that deletes a few tasks every pass and so never trips the per-pass limit. Once it trips, the block holds even after the 24 hours roll over, so what it held back is never applied unreviewed. It lifts with `--allow-bulk`, or by itself once no deletion is planned. Deletions you approve with `--allow-bulk` don't count. `--status` shows the count so far: `deletes (24 h): 3 of 50`.
 
 New tasks are limited per pass too, through `TICKTICK_OPENTODO_SYNC_MAX_CREATES` (default 50, not applied to the first seed). Many new tasks at once most likely means lost pairs, for example an older state backup restored: every task made since would be duplicated in both apps. A legitimate bulk add, such as a large template, goes through with `--allow-bulk`.
 

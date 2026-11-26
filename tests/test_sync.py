@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 import pytest
 from fakes import FakeOpenTodo, FakeTickTick, deny_writes
 
+from ticktick_opentodo_sync.http import ApiError
 from ticktick_opentodo_sync.opentodo import PLACEHOLDER
 from ticktick_opentodo_sync.state import State
 from ticktick_opentodo_sync.sync import PassResult, Syncer, deletes_in_last_day
@@ -152,6 +154,26 @@ def test_list_deleted_in_ticktick_archives_its_project(env: Env) -> None:
     assert env.state.project_pairs() == {}
     assert not env.tt.projects_  # not recreated
     assert env.ot_by_title("Draft")["deleted_at"] is None  # left in the archived project
+    env.assert_quiet()
+
+
+def test_failed_archive_lets_the_pass_finish(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """It raised out of the pass: deletions went unrecorded, habits were skipped (review #24)."""
+    otp = _delete_list(env, 2)
+    env.tt.add_habit("Stretch")
+
+    def refuse(project_id: str) -> dict[str, Any]:
+        raise ApiError("OpenTodo", "PATCH", f"/api/v1/projects/{project_id}", 502, "bad gateway")
+
+    monkeypatch.setattr(env.ot, "archive_project", refuse)
+    res = env.run()
+    assert res.errors == 1 and res.ot.deleted == 2 and res.habits_ot.created == 1, res.summary()
+    assert deletes_in_last_day(env.state, int(time.time() * 1000)) == 2
+    assert env.state.get_meta_json("last_change")["errors"] == 1
+    assert not env.ot.projects_[otp]["archived"] and env.state.project_pairs()
+    monkeypatch.undo()
+    res = env.run()  # tried again
+    assert res.ok and env.ot.projects_[otp]["archived"] and not env.state.project_pairs()
     env.assert_quiet()
 
 

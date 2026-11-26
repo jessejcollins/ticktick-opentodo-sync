@@ -460,12 +460,18 @@ class Syncer:
             return
         self.state.check_writable()
         for tt_id, ot_id in w.projects.retire:
-            self.ot.archive_project(ot_id)
+            name = w.project_names.get(PENDING_PREFIX + ot_id, ot_id)
+            try:
+                self.ot.archive_project(ot_id)
+            except Exception as exc:
+                # Counted, and tried again next pass. Raising skipped the rest of the pass:
+                # its deletions went unrecorded (daily budget) and habits didn't sync.
+                res.errors += 1
+                log.error("failed to archive OpenTodo project %r: %s", name, exc)  # noqa: TRY400
+                log.debug("traceback", exc_info=True)
+                continue
             self.state.drop_project_pair(tt_id)
-            log.info(
-                "archived OpenTodo project %r: its TickTick list was deleted",
-                w.project_names.get(PENDING_PREFIX + ot_id, ot_id),
-            )
+            log.info("archived OpenTodo project %r: its TickTick list was deleted", name)
 
     def _collect_tt(
         self, w: World, project_ids: list[str], in_scope: set[str], dry_run: bool

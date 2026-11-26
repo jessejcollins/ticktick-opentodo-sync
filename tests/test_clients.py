@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import email.utils
 import json
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -47,6 +49,37 @@ def test_retry_on_429_honours_retry_after() -> None:
     )
     assert TickTick(http(TT, sleeps)).projects() == []
     assert sleeps == [7.0, 2.0]
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "value", ["-1", "0", "nan", "inf", "soon", "Wed, 21 Oct 2015 07:28:00 GMT"]
+)
+def test_unusable_retry_after_falls_back_to_the_backoff(value: str) -> None:
+    """time.sleep raised on a negative or NaN Retry-After, failing the pass (review #18)."""
+    sleeps: list[float] = []
+    respx.get(f"{TT}/open/v1/project").mock(
+        side_effect=[
+            httpx.Response(503, headers={"Retry-After": value}),
+            httpx.Response(200, json=[]),
+        ]
+    )
+    assert TickTick(http(TT, sleeps)).projects() == []
+    assert sleeps == [1.0]  # the backoff's first step
+
+
+@respx.mock
+def test_retry_after_as_an_http_date() -> None:
+    sleeps: list[float] = []
+    when = email.utils.format_datetime(datetime.now(UTC) + timedelta(seconds=30), usegmt=True)
+    respx.get(f"{TT}/open/v1/project").mock(
+        side_effect=[
+            httpx.Response(429, headers={"Retry-After": when}),
+            httpx.Response(200, json=[]),
+        ]
+    )
+    assert TickTick(http(TT, sleeps)).projects() == []
+    assert 25 < sleeps[0] <= 30
 
 
 @respx.mock

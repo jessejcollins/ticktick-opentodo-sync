@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import email.utils
 import logging
+import math
 import time
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -156,8 +159,22 @@ def _retryable(resp: httpx.Response, idempotent: bool) -> bool:
 
 
 def _retry_after(resp: httpx.Response) -> float | None:
-    value = resp.headers.get("Retry-After")
-    try:
-        return float(value) if value else None
-    except ValueError:
+    """Seconds the server asks to wait (a number or an HTTP date), or None when unusable.
+
+    Only a finite, positive wait: ``time.sleep`` raised on a negative or NaN one, failing
+    the pass, and anything else falls back to the backoff.
+    """
+    value = (resp.headers.get("Retry-After") or "").strip()
+    if not value:
         return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = email.utils.parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        seconds = (when - datetime.now(UTC)).total_seconds()
+    return seconds if math.isfinite(seconds) and seconds > 0 else None

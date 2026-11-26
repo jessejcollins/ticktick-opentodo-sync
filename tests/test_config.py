@@ -17,6 +17,8 @@ def test_defaults() -> None:
     assert cfg.interval == 300
     assert cfg.opentodo_url == "https://ot.example"
     assert cfg.timezone is None
+    assert cfg.log_level == "INFO"
+    assert load(REQUIRED | {"TICKTICK_OPENTODO_SYNC_LOG_LEVEL": " debug "}).log_level == "DEBUG"
 
 
 def test_missing_required() -> None:
@@ -33,6 +35,7 @@ def test_missing_required() -> None:
         ("TICKTICK_OPENTODO_SYNC_MAX_DESTRUCTIVE", "x"),
         ("TICKTICK_OPENTODO_SYNC_MAX_DELETES_PER_DAY", "-1"),
         ("TICKTICK_OPENTODO_SYNC_ALLOW_HTTP", "maybe"),
+        ("TICKTICK_OPENTODO_SYNC_LOG_LEVEL", "VERBOSE"),  # basicConfig raised: a traceback
         ("OPENTODO_URL", "ot.example"),
         ("OPENTODO_URL", "ftp://ot.example"),
         ("OPENTODO_URL", "https://"),

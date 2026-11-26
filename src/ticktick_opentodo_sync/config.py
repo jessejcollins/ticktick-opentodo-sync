@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import ipaddress
+import logging
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -210,12 +211,23 @@ def load(env: Mapping[str, str] | None = None, env_file: Path | None = None) -> 
             str(get("TICKTICK_OPENTODO_SYNC_HTTP_TIMEOUT", "20")),
             1.0,
         ),
-        log_level=str(get("TICKTICK_OPENTODO_SYNC_LOG_LEVEL", "INFO")).upper(),
+        log_level=_log_level(str(get("TICKTICK_OPENTODO_SYNC_LOG_LEVEL", "INFO"))),
         # Not stripped: whitespace may be part of a passphrase.
         opentodo_passphrase=merged.get("OPENTODO_ENCRYPTION_PASSPHRASE") or None,
         opentodo_recovery_key=get("OPENTODO_ENCRYPTION_RECOVERY_KEY"),
         warnings=tuple(warnings),
     )
+
+
+def _log_level(value: str) -> str:
+    """Checked here: logging.basicConfig raised on an unknown one, a traceback at startup."""
+    level = value.strip().upper()
+    if level not in logging.getLevelNamesMapping():
+        raise ConfigError(
+            f"TICKTICK_OPENTODO_SYNC_LOG_LEVEL: expected DEBUG, INFO, WARNING or ERROR, "
+            f"got {value!r}"
+        )
+    return level
 
 
 def _base_url(name: str, url: str, allow_http: bool, warnings: list[str]) -> str:

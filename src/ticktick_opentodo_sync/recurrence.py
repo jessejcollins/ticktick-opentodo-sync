@@ -5,7 +5,8 @@ A port of OpenTodo's ``recurrence.FromRRULE``, ``Rule.Compatible`` and ``Rule.Ca
 translates exactly when OpenTodo itself would accept it. Anything it can't express exactly is
 reported as untranslatable instead of approximated.
 
-Phase 2 groundwork: nothing here is synced yet (see CLAUDE.md, "Recurrence rules").
+Used both ways by the task mapping (see CLAUDE.md, "Recurrence" in the decisions log) and by
+the habit sync for habits' repeat rules.
 """
 
 from __future__ import annotations

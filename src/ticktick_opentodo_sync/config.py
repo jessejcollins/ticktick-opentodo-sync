@@ -6,6 +6,7 @@ import difflib
 import ipaddress
 import logging
 import os
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -103,7 +104,10 @@ def read_env_file(path: Path) -> dict[str, str]:
         if not sep or not key.strip().isidentifier():
             raise ConfigError(f"{path}:{lineno}: expected KEY=VALUE")
         value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        quote = value[:1]
+        if quote in ("'", '"') and (m := re.fullmatch(rf"{quote}(.*?){quote}\s+#.*", value)):
+            value = m.group(1)  # KEY='value' # comment (the quotes used to stay in the value)
+        elif len(value) >= 2 and quote in ("'", '"') and value[-1] == quote:
             value = value[1:-1]
         elif " #" in value:
             value = value.split(" #", 1)[0].rstrip()

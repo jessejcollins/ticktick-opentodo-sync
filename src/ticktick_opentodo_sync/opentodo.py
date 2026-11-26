@@ -13,7 +13,7 @@ from collections.abc import Callable
 from typing import Any, cast
 
 from . import e2ee
-from .http import ApiError, Http
+from .http import Http
 from .models import JSON
 
 log = logging.getLogger(__name__)
@@ -185,7 +185,7 @@ class OpenTodo:
         except Exception:
             try:
                 self.http.request("DELETE", f"{path}/{new_id}", not_found_ok=True)
-            except ApiError as exc:
+            except Exception as exc:  # logged; the PATCH's error is the one to raise
                 log.error(  # noqa: TRY400
                     "could not remove half-created OpenTodo %s %s (title %r): %s",
                     entity,

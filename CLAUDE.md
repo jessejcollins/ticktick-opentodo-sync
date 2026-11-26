@@ -119,7 +119,7 @@ ticktick-opentodo-sync/
 Settled answers from the build. Dates are when they were decided or learned.
 
 - **TickTick auth:** personal API token in `TICKTICK_TOKEN`. No OAuth flow, no refresh logic. (TickTick's OAuth docs only describe the `authorization_code` grant, with no refresh grant and no documented lifetime.)
-- **Dependencies:** runtime `httpx`, plus `cryptography` (for OpenTodo E2EE: the stdlib has no AES). No `python-dotenv`: compose's `env_file:` loads `.env`, and `config.py` has a small stdlib parser for runs outside Docker. Dev extra: `pytest`, `respx`, `ruff`, `mypy`.
+- **Dependencies:** runtime `httpx`, plus `cryptography` (for OpenTodo E2EE: the stdlib has no AES). No `python-dotenv`: compose's `env_file:` loads `.env`, and `config.py` has a small stdlib parser for runs outside Docker. Dev extra: `pytest`, `respx`, `ruff` (pinned: `ruff format --check` changes with its releases), `mypy`.
 - **Docker:** deployed with Docker Compose, built on the host, scheduled by an in-container loop (not systemd, not cron).
 - **Naming:** everything is `ticktick-opentodo-sync`: CLI command, Docker image, Compose service, container, volume (`ticktick-opentodo-sync-data`), Unix user, paths and files. Where hyphens aren't allowed, the import package is `ticktick_opentodo_sync` and the env var prefix is `TICKTICK_OPENTODO_SYNC_`.
 - **OpenTodo end-to-end encryption** (2026-11-21, learned after it broke a sync). With encryption on, every REST read returns task `title`/`description` and project/label `name` as `enc:v1:<base64url(nonce|AES-256-GCM|tag)>`; the server never decrypts. An early version read that ciphertext as "changed in OpenTodo" and pushed it into TickTick; the tasks were restored from `GET /api/v1/tasks/{id}/history`.

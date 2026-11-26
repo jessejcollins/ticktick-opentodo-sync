@@ -180,7 +180,7 @@ def parse_recovery_key(text: str) -> bytes:
 
 
 def unlock_with_recovery_key(record: KeyRecord, text: str) -> AccountKey:
-    if record.kdf != KDF_PBKDF2_SHA256:
-        raise E2EEError(f"unsupported key derivation {record.kdf}")
+    # Not checked against record.kdf: that's the passphrase's derivation, and the recovery
+    # key has its own (HKDF), so a new passphrase KDF mustn't lock the recovery key out.
     hkdf = HKDF(algorithm=hashes.SHA256(), length=KEY_BYTES, salt=bytes(32), info=RECOVERY_INFO)
     return _unwrap(hkdf.derive(parse_recovery_key(text)), record.wrapped_by_recovery)

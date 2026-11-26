@@ -93,6 +93,25 @@ def test_env_file_parsing_and_precedence(tmp_path: Path) -> None:
     assert cfg.dry_run is False
 
 
+def test_env_file_quoted_values(tmp_path: Path) -> None:
+    """KEY='value' # comment kept its quotes: a passphrase that wouldn't unlock."""
+    f = tmp_path / ".env"
+    f.write_text(
+        "A='secret pass' # the passphrase\n"
+        'B="x" #c\n'
+        "C='keeps # inside'\n"
+        "D='it's'\n"
+        "E=plain # comment\n"
+    )
+    assert read_env_file(f) == {
+        "A": "secret pass",
+        "B": "x",
+        "C": "keeps # inside",
+        "D": "it's",
+        "E": "plain",
+    }
+
+
 def test_env_file_bad_line(tmp_path: Path) -> None:
     f = tmp_path / ".env"
     f.write_text("NOT A PAIR\n")

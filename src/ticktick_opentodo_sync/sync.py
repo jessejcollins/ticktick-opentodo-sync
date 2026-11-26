@@ -172,6 +172,8 @@ class World:
     retiring: set[str] = field(default_factory=set)
     """Project keys of OpenTodo projects whose TickTick list was deleted: only their paired
     tasks are in scope (for the delete rules); new ones are never copied to TickTick."""
+    failed_ot: set[str] = field(default_factory=set)
+    """OpenTodo ids of tasks whose action failed this pass (their project isn't archived)."""
     tt_lists_alive: set[str] = field(default_factory=set)
     """TickTick lists a looked-up task was found in: they exist, listed or not."""
     ot_tasks_read: int = 0
@@ -447,20 +449,25 @@ class Syncer:
     def _retire_projects(self, w: World, res: PassResult) -> None:
         """Archive the OpenTodo projects whose TickTick list was deleted; forget the pairs.
 
-        Only after a pass without errors: their paired tasks must have gone through the
-        delete rules first, as an archived project's tasks are out of scope for good.
+        Its paired tasks must have gone through the delete rules first, as an archived
+        project's tasks are out of scope for good: a project waits while one of them failed
+        this pass. Errors elsewhere don't hold it up (they used to, indefinitely).
         """
         if not w.projects.retire:
-            return
-        if res.errors:
-            log.warning(
-                "archiving the OpenTodo project(s) of deleted TickTick lists waits for a pass "
-                "without errors"
-            )
             return
         self.state.check_writable()
         for tt_id, ot_id in w.projects.retire:
             name = w.project_names.get(PENDING_PREFIX + ot_id, ot_id)
+            failed = sum(
+                (w.ot_raw.get(oid) or {}).get("project_id") == ot_id for oid in w.failed_ot
+            )
+            if failed:
+                log.warning(
+                    "archiving OpenTodo project %r waits: %d of its tasks failed this pass",
+                    name,
+                    failed,
+                )
+                continue
             try:
                 self.ot.archive_project(ot_id)
             except Exception as exc:
@@ -767,6 +774,7 @@ class Syncer:
                     return None
 
         actions = self._mark_tt_occurrences(engine.plan(w.pairs.values(), w.tt, w.ot), w)
+        actions = self._out_of_retiring(actions, w)
         # Parents before their subtasks, so a new subtask's parent exists when it is created.
         actions.sort(key=lambda a: a.task is not None and a.task.parent is not None)
         item_actions = self._plan_items(w, actions)
@@ -817,6 +825,49 @@ class Syncer:
             )
             return None
         return actions, item_actions
+
+    def _out_of_retiring(self, actions: list[Action], w: World) -> list[Action]:
+        """TickTick wins a move into a project whose TickTick list was deleted.
+
+        The project is still visible in OpenTodo until it's archived. A paired task moved
+        into it there was pushed to TickTick, where the list is gone: an error every pass,
+        which also kept the project from being archived. Now the task keeps its TickTick
+        list, and OpenTodo is moved back.
+        """
+        out: list[Action] = []
+        for a in actions:
+            tt_task = w.tt.tasks.get(a.tt_id or "")
+            ot_task = w.ot.tasks.get(a.ot_id or "")
+            if (
+                a.kind is not Kind.UPDATE_TT
+                or a.task is None
+                or a.task.project not in w.retiring
+                or tt_task is None
+                or ot_task is None
+            ):
+                out.append(a)
+                continue
+            fixed = replace(a.task, project=tt_task.project)
+            if a.occurrence:
+                # OpenTodo moved on already: complete in TickTick, move OpenTodo next pass.
+                out.append(replace(a, task=fixed))
+                continue
+            write_tt = fixed != tt_task
+            out.append(
+                Action(
+                    Kind.UPDATE_OT,
+                    tt_id=a.tt_id,
+                    ot_id=a.ot_id,
+                    task=fixed,
+                    tt_hash=None if write_tt else tt_task.content_hash(),
+                    conflict=True,
+                    completes=fixed.completed and not ot_task.completed,
+                    note="moved into a project whose TickTick list was deleted: moved back",
+                )
+            )
+            if write_tt:
+                out.append(replace(a, task=fixed, ot_hash=None))
+        return out
 
     def _block(self, res: PassResult, reason: str, blocked: list[str], *, dry_run: bool) -> None:
         """A guard tripped: log what it holds back and record it (``--status``, health)."""
@@ -962,6 +1013,8 @@ class Syncer:
             return
         except Exception as exc:
             res.errors += 1
+            if a.ot_id:
+                w.failed_ot.add(a.ot_id)
             log.error("failed to %s: %s", desc, exc)  # noqa: TRY400
             log.debug("traceback", exc_info=True)
             return

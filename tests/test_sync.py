@@ -177,6 +177,67 @@ def test_failed_archive_lets_the_pass_finish(env: Env, monkeypatch: pytest.Monke
     env.assert_quiet()
 
 
+def _work_and_home(env: Env) -> tuple[str, str, str]:
+    """Lists Work (deleted in TickTick, with its task) and Home (task "Keep") after a sync:
+    (Keep's TickTick id, Work's and Home's OpenTodo projects)."""
+    home = env.tt.add_project("Home")
+    keep = env.tt.add_task("Keep", home)
+    _delete_list(env, 1)
+    by_name = {p["name"]: p["id"] for p in env.ot.projects_.values()}
+    return keep, by_name["Work"], by_name["Home"]
+
+
+def test_move_into_a_retiring_project_is_moved_back(env: Env) -> None:
+    """It was pushed to TickTick, where the list is gone: an error every pass, and the
+    project never archived (review #25). TickTick wins: OpenTodo is moved back."""
+    keep, work, home = _work_and_home(env)
+    env.ot_by_title("Keep")["project_id"] = work  # moved in OpenTodo, before the archive
+    res = env.run()
+    assert res.ok and res.ot.deleted == 1 and res.conflicts == 1, res.summary()
+    assert env.ot_by_title("Keep")["project_id"] == home
+    assert env.tt.tasks[keep]["projectId"] in env.tt.projects_
+    assert env.ot.projects_[work]["archived"] is True
+    env.assert_quiet()
+
+
+def test_unrelated_error_doesnt_hold_up_the_archive(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any error in the pass deferred it; only its own tasks' failures should (review #25)."""
+    _, work, _ = _work_and_home(env)
+    env.ot_by_title("Keep")["title"] = "Keep it"  # an edit whose TickTick write fails
+
+    def refuse(task_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        raise ApiError("TickTick", "POST", f"/open/v1/task/{task_id}", 500, "boom")
+
+    monkeypatch.setattr(env.tt, "update_task", refuse)
+    res = env.run()
+    assert res.errors == 1 and env.ot.projects_[work]["archived"] is True, res.summary()
+
+
+def test_failure_in_a_retiring_project_holds_up_its_archive(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its tasks must go through the delete rules first: archived, they'd be out of scope."""
+    work = _delete_list(env, 2)
+    delete_task = env.ot.delete_task
+    calls: list[str] = []
+
+    def fail_once(task_id: str) -> None:
+        calls.append(task_id)
+        if len(calls) == 1:
+            raise ApiError("OpenTodo", "DELETE", f"/api/v1/tasks/{task_id}", 500, "boom")
+        delete_task(task_id)
+
+    monkeypatch.setattr(env.ot, "delete_task", fail_once)
+    res = env.run()
+    assert res.errors == 1 and res.ot.deleted == 1, res.summary()
+    assert env.ot.projects_[work]["archived"] is False
+    res = env.run()
+    assert res.ok and res.ot.deleted == 1 and env.ot.projects_[work]["archived"] is True
+    env.assert_quiet()
+
+
 def test_blocked_pass_writes_no_list_or_project_either(env: Env) -> None:
     """Lists and projects were created while collecting, before the guards ran."""
     otp = _delete_list(env, 12)

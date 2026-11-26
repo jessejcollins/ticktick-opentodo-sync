@@ -202,6 +202,21 @@ class OpenTodo:
         items = _items(self.http.request("GET", "/api/v1/projects"), "projects")
         return [self._open("project", p, NAME_CONTENT) for p in items]
 
+    def project(self, project_id: str) -> JSON | None:
+        """One project (trashed ones included, if the server sends them), or None on a 404.
+
+        Asked when a known project is missing from :meth:`projects`: an incomplete listing
+        must not read as "gone". Anything that isn't this project raises.
+        """
+        data = self.http.request("GET", f"/api/v1/projects/{project_id}", not_found_ok=True)
+        if data is None:
+            return None
+        if isinstance(data, dict) and isinstance(data.get("project"), dict):
+            data = data["project"]  # in case it comes wrapped, like the listings
+        if isinstance(data, dict) and str(data.get("id")) == project_id:
+            return self._open("project", data, NAME_CONTENT)
+        raise TypeError(f"unexpected OpenTodo response for project {project_id}")
+
     def create_project(self, name: str) -> JSON:
         return self._create_sealed(
             "project", "projects", {"name": name}, NAME_CONTENT, _idempotency_key()

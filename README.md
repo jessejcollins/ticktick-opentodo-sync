@@ -217,6 +217,7 @@ New tasks are limited per pass too, through `TICKTICK_OPENTODO_SYNC_MAX_CREATES`
   - **"After completion" rules** always just move the date.
 - **Lists and projects:** matched by name, then by ID; a list or project that exists on one side only is created on the other.
   - Deleting a list in TickTick archives its OpenTodo project, after its tasks have gone to OpenTodo's Trash through the bulk-delete guard.
+  - A list or project missing from one listing isn't taken as deleted while its tasks, or the project itself, can still be found. The sync logs a warning and leaves it as it is.
   - Deleting a project in OpenTodo brings it back from the Trash with its tasks (TickTick wins).
   - A new list is never paired with an archived project.
 - **Subtasks:** TickTick checklist items appear in OpenTodo as subtasks, ticked items as completed ones, and TickTick child tasks as OpenTodo subtasks. Titles and ticks sync both ways, as do adding and deleting. A subtask added in OpenTodo becomes a checklist item if the TickTick task is a checklist, otherwise a TickTick child task. Order is copied when an item is created, not afterwards. On a conflict TickTick wins, including whether an item is ticked.

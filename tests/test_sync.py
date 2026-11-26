@@ -193,6 +193,55 @@ def test_project_purged_in_opentodo_is_recreated(env: Env) -> None:
     env.assert_quiet()
 
 
+def test_list_missing_from_one_listing_is_not_archived(env: Env) -> None:
+    """Its project was archived, and the list's tasks stopped syncing for good (review #23)."""
+    work = env.tt.add_project("Work")
+    tid = env.tt.add_task("Draft memo", work)
+    env.run()
+    (otp,) = env.ot.projects_
+    hidden = env.tt.projects_.pop(work)  # one listing comes back without it
+    res = env.run()
+    assert res.ok and not env.ot.projects_[otp]["archived"], res.summary()
+    assert env.state.project_pairs() == {work: otp}
+    env.tt.projects_[work] = hidden
+    env.tt.tasks[tid]["title"] = "Final memo"
+    res = env.run()
+    assert res.ok and res.ot.updated == 1, res.summary()
+    assert [p["name"] for p in env.ot.projects_.values()] == ["Work"]
+    assert env.ot_by_title("Final memo")["project_id"] == otp
+    env.assert_quiet()
+
+
+def test_project_missing_from_one_listing_is_kept(env: Env) -> None:
+    """It became a new project, then a second TickTick list taking the tasks (review #23)."""
+    work = env.tt.add_project("Work")
+    tid = env.tt.add_task("Draft memo", work)
+    env.run()
+    (otp,) = env.ot.projects_
+    env.ot.unlisted.add(otp)  # one listing leaves it out; it still exists
+    res = env.run()
+    assert res.ok and not any(w[0] == "create_project" for w in env.ot.writes[1:]), res.summary()
+    env.ot.unlisted.clear()
+    env.run()
+    assert list(env.ot.projects_) == [otp] and list(env.tt.projects_) == [work]
+    assert env.tt.tasks[tid]["projectId"] == work
+    assert env.state.project_pairs() == {work: otp}
+    env.assert_quiet()
+
+
+def test_trashed_project_left_out_of_the_listing_is_restored(env: Env) -> None:
+    """Whether OpenTodo lists trashed projects is unverified: a GET finds them either way."""
+    seed(env)
+    otp = next(iter(env.ot.projects_))
+    env.ot.projects_[otp]["deleted_at"] = 1
+    env.ot.unlisted.add(otp)
+    res = env.run()
+    assert res.ok and env.ot.projects_[otp]["deleted_at"] is None, res.summary()
+    assert len(env.ot.projects_) == 1 and not res.tt.deleted
+    env.ot.unlisted.clear()
+    env.assert_quiet()
+
+
 def test_new_list_never_pairs_with_an_archived_project(env: Env) -> None:
     """Its tasks would never sync: an archived project is out of scope."""
     old = env.ot.add_project("Groceries", archived=True)

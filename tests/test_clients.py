@@ -238,6 +238,26 @@ def test_opentodo_endpoints() -> None:
 
 
 @respx.mock
+def test_opentodo_single_project() -> None:
+    """Asked when a paired project is missing from the listing: only a 404 means gone."""
+    ot = OpenTodo(http(OT))
+    respx.get(f"{OT}/api/v1/projects/gone").mock(return_value=httpx.Response(404))
+    assert ot.project("gone") is None
+    trashed = {"id": "p1", "name": "Work", "deleted_at": 5}
+    respx.get(f"{OT}/api/v1/projects/p1").mock(return_value=httpx.Response(200, json=trashed))
+    assert ot.project("p1") == trashed
+    respx.get(f"{OT}/api/v1/projects/p2").mock(
+        return_value=httpx.Response(200, json={"project": {"id": "p2", "name": "Home"}})
+    )
+    assert ot.project("p2") == {"id": "p2", "name": "Home"}
+    odd_answers: list[object] = [{}, {"id": "other"}, []]
+    for odd in odd_answers:
+        respx.get(f"{OT}/api/v1/projects/p3").mock(return_value=httpx.Response(200, json=odd))
+        with pytest.raises(TypeError):
+            ot.project("p3")
+
+
+@respx.mock
 def test_opentodo_reminders() -> None:
     """Only live relative reminders are read and reconciled; other kinds are left alone."""
     ot = OpenTodo(http(OT))

@@ -63,6 +63,7 @@ class TickTickApi(Protocol):
 class OpenTodoApi(Protocol):
     def begin_pass(self) -> None: ...
     def projects(self) -> list[JSON]: ...
+    def project(self, project_id: str) -> JSON | None: ...
     def create_project(self, name: str) -> JSON: ...
     def rename_project(self, project_id: str, name: str) -> JSON: ...
     def archive_project(self, project_id: str) -> JSON: ...
@@ -171,6 +172,8 @@ class World:
     retiring: set[str] = field(default_factory=set)
     """Project keys of OpenTodo projects whose TickTick list was deleted: only their paired
     tasks are in scope (for the delete rules); new ones are never copied to TickTick."""
+    tt_lists_alive: set[str] = field(default_factory=set)
+    """TickTick lists a looked-up task was found in: they exist, listed or not."""
     ot_tasks_read: int = 0
 
 
@@ -224,7 +227,7 @@ class Syncer:
         ot_project_ids: set[str] = set()
         trashed: set[str] = set()
         renames: list[tuple[str, str]] = []
-        ot_project_list = self.ot.projects()
+        ot_project_list = self._with_unlisted_projects(self.ot.projects())
         ot_task_list = self.ot.tasks()  # before reconciling projects: see _find_habits_project
         habits_project = self.state.get_meta(META_PROJECT) or self._find_habits_project(
             ot_project_list, ot_task_list, dry_run=dry_run
@@ -298,7 +301,47 @@ class Syncer:
         self._resolve_missing_tt(world, in_scope)
         self._refresh_tt_projects(world, dry_run=dry_run)
         self._collect_subtasks(world, children, in_scope)
+        self._hold_retiring(world)
         return world
+
+    def _with_unlisted_projects(self, listed: list[JSON]) -> list[JSON]:
+        """OpenTodo's project listing, plus paired projects it left out that still exist.
+
+        A paired project missing from one listing read as purged: the pair was dropped and
+        the list got a new project, and once the old one was listed again it became a
+        second TickTick list, taking the original list's tasks with it. So each one is
+        looked up: a 404 means gone; a project that answers (trashed or not) is used.
+        """
+        listed_ids = {str(p.get("id")) for p in listed}
+        out = list(listed)
+        for pid in sorted(set(self.state.project_pairs().values()) - listed_ids):
+            found = self.ot.project(pid)
+            if found is not None:
+                log.warning(
+                    "OpenTodo project %s is missing from the project listing but still exists; "
+                    "using it",
+                    pid,
+                )
+                out.append(found)
+        return out
+
+    def _hold_retiring(self, w: World) -> None:
+        """Archive a project only once its TickTick list is really gone.
+
+        A list missing from one listing read as deleted: its project was archived, and the
+        list's tasks, still paired with copies in the archived project, stopped syncing for
+        good. A task of that list found alive under it (see :meth:`_resolve_missing_tt`)
+        proves the list still exists, so its project is kept this pass.
+        """
+        held = [r for r in w.projects.retire if r[0] in w.tt_lists_alive]
+        for tt_id, ot_id in held:
+            log.warning(
+                "TickTick list %s is missing from the list listing but its tasks are still in "
+                "it; not archiving OpenTodo project %r",
+                tt_id,
+                w.project_names.get(PENDING_PREFIX + ot_id, ot_id),
+            )
+        w.projects.retire = [r for r in w.projects.retire if r not in held]
 
     def _refresh_tt_projects(self, w: World, *, dry_run: bool) -> None:
         """Keep each pair's TickTick list id on the list the task was last seen in.
@@ -619,6 +662,8 @@ class Syncer:
             if raw is None or raw.get("deleted"):
                 w.tt.deleted.add(p.tt_id)
                 continue
+            if raw.get("projectId"):
+                w.tt_lists_alive.add(str(raw["projectId"]))
             task = self._normalize(w.mapper.from_tt, raw, "TickTick", p.tt_id)
             if task is None or (raw.get("parentId") and raw["parentId"] not in w.tt.tasks):
                 w.tt.out_of_scope.add(p.tt_id)

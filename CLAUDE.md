@@ -178,6 +178,9 @@ Settled answers from the build. Dates are when they were decided or learned.
   - **List deleted in TickTick:** the OpenTodo project is "retiring". Only its paired tasks are in scope, so they follow the delete rules (bulk-guarded), and new OpenTodo tasks in it are never copied to TickTick. It's archived at the end of the pass, and only after a pass without errors.
   - **Project deleted in OpenTodo:** a delete is a tombstone that only hides the project's tasks (`project_id` kept). Restoring it (`deleted_at: null`) brings them back. A project gone from the listing altogether is recreated, as before; purging also purges its tasks, which are then deleted in TickTick through the bulk guard.
   - **Name matching:** a live list never pairs with an archived project, otherwise its tasks would never sync.
+  - **Missing from one listing** (2026-11-26). A list or project absent from a single listing was taken as deleted. A list's project was archived, and the list's tasks, still paired with copies in it, stopped syncing for good. A project was recreated, and once listed again became a second TickTick list that took the original list's tasks.
+    - **List:** archived only once it's really gone. A paired task looked up and found still in that list (`World.tt_lists_alive`) keeps the project, with a warning.
+    - **Project:** a paired project missing from the listing is looked up (`GET /api/v1/projects/{id}`). Only a 404 means gone; one that answers is used, trashed or not.
 
 ## Git workflow
 
